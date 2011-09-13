@@ -1,3 +1,7 @@
 {
-    "run_list": [ "recipe[pais::default]", "recipe[apache2]" ]
+    "run_list": [ 
+      "recipe[pais::default]", 
+      "recipe[apache2]",
+      "recipe[passenger_apache2]"
+    ]
 }
