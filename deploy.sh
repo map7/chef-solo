@@ -1,6 +1,8 @@
 #!/bin/bash
 # Copies files to the server and runs install.
 
+play 'bork.wav' 2>/dev/null &
+
 #host="${1:-map7@192.168.200.161}"
 host="${1}"
 
