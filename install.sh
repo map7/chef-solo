@@ -32,4 +32,4 @@ if ! test -f "$chef_binary"; then
      sudo gem install --no-rdoc --no-ri chef --version 0.10.0
 fi
 
-"$chef_binary" -c solo.rb -j "$role"
+"$chef_binary" --config solo.rb --json-attributes "$role"
