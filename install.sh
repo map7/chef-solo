@@ -1,9 +1,9 @@
 #!/bin/bash
 
-role="${1}"
+json="${1}"
 
-if [ -z "$role" ]; then
-    role="solo.json"
+if [ -z "$json" ]; then
+    json="solo.json"
 fi
 
 # This runs as root on the server
@@ -32,4 +32,4 @@ if ! test -f "$chef_binary"; then
      sudo gem install --no-rdoc --no-ri chef --version 0.10.0
 fi
 
-"$chef_binary" --config solo.rb --json-attributes "$role"
+"$chef_binary" --config solo.rb --json-attributes "$json"

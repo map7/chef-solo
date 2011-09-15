@@ -5,12 +5,12 @@ play 'bork.wav' 2>/dev/null &
 
 #host="${1:-map7@192.168.200.161}"
 host="${1}"
-role="${2}"
+json="${2}"
 
 if [ -z "$host" ]; then
-    echo "Usage: ./deploy.sh [user@host] [role]"
+    echo "Usage: ./deploy.sh [user@host] [json]"
     echo "\nEG: ./deploy.sh fred@192.168.1.1 web_server.json"
-    echo "If no role is given it will default to solo.json"
+    echo "If no json is given it will default to solo.json"
     exit
 fi
 
@@ -25,4 +25,4 @@ sudo rm -rf ~/chef &&
 mkdir ~/chef &&
 cd ~/chef &&
 tar xj &&
-sudo bash install.sh $role"
+sudo bash install.sh $json"
