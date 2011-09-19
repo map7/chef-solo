@@ -2,34 +2,39 @@
 
 json="${1}"
 
-if [ -z "$json" ]; then
-    json="solo.json"
-fi
+logfile="/root/chef-solo.log"
 
 # This runs as root on the server
-#chef_binary=/var/lib/gems/1.9.1/bin/chef-solo
-chef_binary=/usr/bin/chef-solo
+chef_binary="/usr/local/rvm/gems/ruby-1.9.2-p180/bin/chef-solo"
 
 # Are we on a vanilla system?
 if ! test -f "$chef_binary"; then
 
      export DEBIAN_FRONTEND=noninteractive
      # Upgrade headlessly (this is only safe-ish on vanilla systems)
-     aptitude update
-     apt-get -o Dpkg::Options::="--force-confnew" \
-         --force-yes -fuy dist-upgrade
+#     aptitude update
+#     apt-get -o Dpkg::Options::="--force-confnew" \
+#         --force-yes -fuy dist-upgrade
     
-     # Install Ruby & Chef
-     aptitude install -y ruby1.9.1 ruby1.9.1-dev make libopenssl-ruby1.9.1 
+     # Install RVM as root (System-wide install)
+     aptitude install -y build-essential bison openssl libreadline6 libreadline6-dev curl git-core zlib1g zlib1g-dev libssl-dev libyaml-dev libsqlite3-0 libsqlite3-dev sqlite3 libxml2-dev autoconf libc6-dev
 
-     # Install rubygems
-     cd /tmp
-     wget http://production.cf.rubygems.org/rubygems/rubygems-1.8.10.tgz
-     tar zxf rubygems-1.8.10.tgz
-     cd rubygems-1.8.10
-     sudo ruby1.9.1 setup.rb --no-format-executable 
+     # Note system-wide installs are not in the RVM main version
+     # bash < <(curl -s https://rvm.beginrescueend.com/install/rvm)
+     bash <( curl -L https://github.com/wayneeseguin/rvm/raw/1.3.0/contrib/install-system-wide ) --version '1.3.0'
+     (cat <<'EOP'
+[[ -s "/usr/local/rvm/scripts/rvm" ]] && source "/usr/local/rvm/scripts/rvm" # This loads RVM into a shell session.
+EOP
+     ) > /etc/profile.d/rvm.sh
 
-     sudo gem install --no-rdoc --no-ri chef --version 0.10.0
+     # Install Ruby using RVM
+     source /etc/profile
+     rvm install 1.9.2
+     rvm use 1.9.2 --default
+
+     gem update --system
+     
+     gem install --no-rdoc --no-ri chef --version 0.10.0
 fi
 
 "$chef_binary" --config solo.rb --json-attributes "$json"
