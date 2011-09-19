@@ -12,9 +12,9 @@ if ! test -f "$chef_binary"; then
 
      export DEBIAN_FRONTEND=noninteractive
      # Upgrade headlessly (this is only safe-ish on vanilla systems)
-#     aptitude update
-#     apt-get -o Dpkg::Options::="--force-confnew" \
-#         --force-yes -fuy dist-upgrade
+     aptitude update
+     apt-get -o Dpkg::Options::="--force-confnew" \
+         --force-yes -fuy dist-upgrade
     
      # Install RVM as root (System-wide install)
      aptitude install -y build-essential bison openssl libreadline6 libreadline6-dev curl git-core zlib1g zlib1g-dev libssl-dev libyaml-dev libsqlite3-0 libsqlite3-dev sqlite3 libxml2-dev autoconf libc6-dev
@@ -37,4 +37,5 @@ EOP
      gem install --no-rdoc --no-ri chef --version 0.10.0
 fi
 
+source /etc/profile
 "$chef_binary" --config solo.rb --json-attributes "$json"
