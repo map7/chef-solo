@@ -5,7 +5,7 @@ json="${1}"
 logfile="/root/chef-solo.log"
 
 # This runs as root on the server
-chef_binary="/usr/local/rvm/gems/ruby-1.9.2-p180/bin/chef-solo"
+chef_binary="/usr/local/rvm/gems/ruby-1.9.2-p290/bin/chef-solo"
 
 # Are we on a vanilla system?
 if ! test -f "$chef_binary"; then
@@ -29,8 +29,8 @@ EOP
 
      # Install Ruby using RVM
      source /etc/profile
-     rvm install 1.9.2
-     rvm use 1.9.2 --default
+     rvm install 1.9.2-p290
+     rvm use 1.9.2-p290 --default
 
      gem update --system
      
