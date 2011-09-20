@@ -11,6 +11,9 @@ chef_binary="/usr/local/rvm/gems/ruby-1.9.2-p290/bin/chef-solo"
 if ! test -f "$chef_binary"; then
 
      export DEBIAN_FRONTEND=noninteractive
+     rm /var/lib/apt/lists/*
+     rm /var/lib/apt/lists/partial/*
+
      # Upgrade headlessly (this is only safe-ish on vanilla systems)
      aptitude update
      apt-get -o Dpkg::Options::="--force-confnew" \
