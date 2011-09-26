@@ -1,3 +1,5 @@
+
+
 # --- Install packages we need ---
 package 'sysstat'
 package 'htop'
@@ -11,6 +13,8 @@ end
 # --- Setup Apache2
 # The passenger-apache cookbook has compiled the library all you need to do is 
 # include the lines in your httpd.conf file.
+# 
+# Your rails app should be put into /var/www/<your app>
 file "/etc/apache2/httpd.conf" do
   owner "root"
   group "root"
@@ -23,14 +27,15 @@ PassengerRoot /usr/local/rvm/gems/ruby-1.9.2-p290/gems/passenger-3.0.7
 PassengerRuby /usr/local/rvm/wrappers/ruby-1.9.2-p290/ruby
 
 #  <VirtualHost *:80>
-#     ServerName www.yourhost.com
-#     DocumentRoot /somewhere/public    # <-- be sure to point to 'public'!
-#     <Directory /somewhere/public>
+#     ServerName www.yourhost.com / hostname
+#     DocumentRoot /var/www/<app>/public    # <-- be sure to point to 'public'!
+#     <Directory /var/www/<app>/public>
 #        AllowOverride all              # <-- relax Apache security settings
 #        Options -MultiViews            # <-- MultiViews must be turned off
 #     </Directory>
 #  </VirtualHost>
 "
 end
+
 
 
