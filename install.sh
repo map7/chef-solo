@@ -18,7 +18,7 @@ if ! test -f "$chef_binary"; then
          --force-yes -fuy dist-upgrade
 
      # Install RVM as root (System-wide install)
-     aptitude install -y build-essential bison openssl libreadline6 libreadline6-dev curl git-core zlib1g zlib1g-dev libssl-dev libyaml-dev libsqlite3-0 libsqlite3-dev sqlite3 libxml2-dev autoconf libc6-dev
+     aptitude install -y curl git-core bzip2 build-essential zlib1g-dev libssl-dev
 
      # Note system-wide installs are not in the RVM main version
      # bash < <(curl -s https://rvm.beginrescueend.com/install/rvm)
@@ -33,10 +33,13 @@ EOP
      rvm install 1.9.2-p290
      rvm use 1.9.2-p290 --default
 
+     # Upgrade rubygems
      gem update --system
      
+     # Install chef
      gem install --no-rdoc --no-ri chef --version 0.10.0
 fi
 
+# Run chef-solo on server
 [[ -s "/usr/local/rvm/scripts/rvm" ]] && source "/usr/local/rvm/scripts/rvm"
 "$chef_binary" --config solo.rb --json-attributes "$json"
