@@ -11,14 +11,12 @@ chef_binary="/usr/local/rvm/gems/ruby-1.9.2-p290/bin/chef-solo"
 if ! test -f "$chef_binary"; then
 
      export DEBIAN_FRONTEND=noninteractive
-     rm /var/lib/apt/lists/*
-     rm /var/lib/apt/lists/partial/*
 
      # Upgrade headlessly (this is only safe-ish on vanilla systems)
-     aptitude update
+     apt-get update -o Acquire::http::No-Cache=True
      apt-get -o Dpkg::Options::="--force-confnew" \
          --force-yes -fuy dist-upgrade
-    
+
      # Install RVM as root (System-wide install)
      aptitude install -y build-essential bison openssl libreadline6 libreadline6-dev curl git-core zlib1g zlib1g-dev libssl-dev libyaml-dev libsqlite3-0 libsqlite3-dev sqlite3 libxml2-dev autoconf libc6-dev
 
