@@ -1,0 +1,15 @@
+* Chef-solo
+  Bootstrapping files for creating a Ruby on Rails server on an 
+  Ubuntu 10.04 LTS machine
+
+** Requirements
+   Blank Ubuntu 10.04 server machine with passwordless SSH access and
+   passwordless sudo for your user.
+
+** Running
+   ./deploy <user>@<host> <json>
+
+   json - This is optional. I've put this there so you can have different server
+   setup config files. eg: web_server.json
+   
+  
