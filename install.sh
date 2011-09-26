@@ -33,10 +33,13 @@ EOP
      rvm install 1.9.2-p290
      rvm use 1.9.2-p290 --default
 
+     # Upgrade rubygems
      gem update --system
      
+     # Install chef
      gem install --no-rdoc --no-ri chef --version 0.10.0
 fi
 
+# Run chef-solo on server
 [[ -s "/usr/local/rvm/scripts/rvm" ]] && source "/usr/local/rvm/scripts/rvm"
 "$chef_binary" --config solo.rb --json-attributes "$json"
