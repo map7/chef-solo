@@ -18,10 +18,7 @@ if ! test -f "$chef_binary"; then
          --force-yes -fuy dist-upgrade
 
      # Install RVM as root (System-wide install)
-     #aptitude install -y build-essential bison openssl libreadline6 libreadline6-dev curl git-core zlib1g zlib1g-dev libssl-dev libyaml-dev libsqlite3-0 libsqlite3-dev sqlite3 libxml2-dev autoconf libc6-dev
-
      aptitude install -y curl git-core bzip2 build-essential zlib1g-dev libssl-dev
-#     aptitude install -y bison openssl libreadline6 libreadline6-dev zlib1g libyaml-dev libxml2-dev autoconf libc6-dev
 
      # Note system-wide installs are not in the RVM main version
      # bash < <(curl -s https://rvm.beginrescueend.com/install/rvm)
