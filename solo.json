@@ -1,6 +1,7 @@
 {
     "run_list": [ 
       "role[web_server]",
+      "recipe[sqlite]",
       "recipe[pais::default]"
     ]
 }
