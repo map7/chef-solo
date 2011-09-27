@@ -39,4 +39,14 @@ PassengerRuby /usr/local/rvm/wrappers/ruby-1.9.2-p290/ruby
 end
 
 
+# Setup postgres user
+# sudo -u postgres createuser -sw map7
+# Set dbuser in your solo.json file.
+execute "create-database-user" do
+  code = <<-EOH
+sudo -u postgres psql -c "select * from pg_user where usename='#{node[:dbuser]}'" | grep -c #{node[:dbuser]}
+EOH
+  command "sudo -u postgres createuser -sw #{node[:dbuser]}"
+  not_if code 
+end
 
