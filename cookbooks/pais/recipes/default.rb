@@ -50,3 +50,5 @@ EOH
   not_if code 
 end
 
+# Install sphinx search
+package 'sphinxsearch'
