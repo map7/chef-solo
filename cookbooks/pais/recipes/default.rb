@@ -66,7 +66,8 @@ execute "create-database-user" do
   code = <<-EOH
 sudo -u postgres psql -c "select * from pg_user where usename='#{node[:dbuser]}'" | grep -c #{node[:dbuser]}
 EOH
-  command "sudo -u postgres createuser -sw #{node[:dbuser]}"
+#  command "sudo -u postgres createuser -sw #{node[:dbuser]}"
+  command "sudo -u postgres psql -c \"create user #{node[:dbuser]} with password '#{node[:dbpass]}' createdb createuser\";"
   not_if code 
 end
 
