@@ -34,8 +34,10 @@ EOP
      rvm install 1.9.2-p290
      rvm use 1.9.2-p290 --default
 
-     # Upgrade rubygems
-     gem update --system
+     # Upgrade rubygems (Latest versions have a lot of problems)
+     # 1.7.2 is a safe version to be on.
+     # or you could use 'bundle exec' in front of everything
+     gem update --system 1.7.2
      
      # Install chef
      gem install --no-rdoc --no-ri chef --version 0.10.0
