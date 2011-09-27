@@ -91,3 +91,8 @@ execute "Install ruby-debug19" do
   command "gem install ruby-debug19 -- --with-ruby-include=$rvm_path/src/$(rvm tools strings)"
   not_if "gem list | grep ruby-debug19"
 end
+
+# Install readline
+execute "Install readline" do
+  command "cd $rvm_path/src/$(rvm tools strings)/ext/readline;sudo ruby extconf.rb; sudo make; sudo make install"
+end
