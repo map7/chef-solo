@@ -7,8 +7,6 @@ logfile="/root/chef-solo.log"
 # This runs as root on the server
 chef_binary="/usr/local/rvm/gems/ruby-1.9.2-p290/bin/chef-solo"
 
-# Always update so that my apt-get keeps working
-apt-get update -o Acquire::http::No-Cache=True
 
 # Are we on a vanilla system?
 if ! test -f "$chef_binary"; then
@@ -16,6 +14,7 @@ if ! test -f "$chef_binary"; then
      export DEBIAN_FRONTEND=noninteractive
 
      # Upgrade headlessly (this is only safe-ish on vanilla systems)
+     apt-get update -o Acquire::http::No-Cache=True
      apt-get -o Dpkg::Options::="--force-confnew" \
          --force-yes -fuy dist-upgrade
 
