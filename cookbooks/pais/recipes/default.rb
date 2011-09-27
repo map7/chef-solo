@@ -1,4 +1,5 @@
-
+include_recipe "apache2"
+include_recipe "postgresql::server"
 
 # --- Install packages we need ---
 package 'sysstat'
