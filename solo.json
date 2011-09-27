@@ -2,6 +2,7 @@
     "run_list": [ 
       "role[web_server]",
       "recipe[sqlite]",
+      "recipe[postgresql::server]",
       "recipe[pais::default]"
     ]
 }
