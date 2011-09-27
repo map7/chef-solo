@@ -65,3 +65,10 @@ end
 
 # Install sphinx search
 package 'sphinxsearch'
+
+execute "Copy sphinx config file" do
+  command "cp /etc/sphinxsearch/sphinx.conf.dist /etc/sphinxsearch/sphinx.conf"
+  not_if do
+    File.exists?("/etc/sphinxsearch/sphinx.conf")
+  end
+end
