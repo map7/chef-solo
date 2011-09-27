@@ -38,6 +38,19 @@ PassengerRuby /usr/local/rvm/wrappers/ruby-1.9.2-p290/ruby
 "
 end
 
+# Setup permissions on deployment area.
+execute "Add #{node[:dbuser]} to group www-data" do
+  command "usermod -a -G www-data #{node[:dbuser]}"
+end
+
+execute "Change group on /var/www" do 
+  command "chown -R root:www-data /var/www"
+end
+
+execute "Change permissions on /var/www" do
+  command "chmod -R 775 /var/www"
+end
+
 
 # Setup postgres user
 # sudo -u postgres createuser -sw map7
