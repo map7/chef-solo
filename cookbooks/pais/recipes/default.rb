@@ -5,6 +5,7 @@ include_recipe "postgresql::server"
 package 'sysstat'
 package 'htop'
 package 'screen'
+package 'apt-file'
 
 # --- Install Rails
 gem_package "rails" do
