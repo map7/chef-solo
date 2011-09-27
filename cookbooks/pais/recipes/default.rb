@@ -51,6 +51,12 @@ execute "Change permissions on /var/www" do
   command "chmod -R 775 /var/www"
 end
 
+# Setup gem sources
+execute "Add gem sources" do
+  command "gem sources -a http://gems.github.com"
+  not_if "gem sources -l | grep http://gems.github.com"
+end
+
 
 # Setup postgres user
 # sudo -u postgres createuser -sw map7
