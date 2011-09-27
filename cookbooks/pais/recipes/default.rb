@@ -83,3 +83,9 @@ end
 # Install nokogiri requirements
 package 'libxslt1-dev'
 package 'libxml2-dev'
+
+# Install ruby-debug
+# This has to be install like this if you run RVM system wide.
+execute "Install ruby-debug19" do 
+  command "gem install ruby-debug19 -- --with-ruby-include=$rvm_path/src/$(rvm tools strings)"
+end
