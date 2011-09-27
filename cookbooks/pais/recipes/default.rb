@@ -89,4 +89,5 @@ package 'libxml2-dev'
 # This has to be install like this if you run RVM system wide.
 execute "Install ruby-debug19" do 
   command "gem install ruby-debug19 -- --with-ruby-include=$rvm_path/src/$(rvm tools strings)"
+  not_if "gem list | grep ruby-debug19"
 end
