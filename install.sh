@@ -7,6 +7,7 @@ logfile="/root/chef-solo.log"
 # This runs as root on the server
 chef_binary="/usr/local/rvm/gems/ruby-1.9.2-p290/bin/chef-solo"
 
+
 # Are we on a vanilla system?
 if ! test -f "$chef_binary"; then
 
