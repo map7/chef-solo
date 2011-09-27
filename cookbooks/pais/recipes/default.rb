@@ -78,3 +78,7 @@ execute "Copy sphinx config file" do
     File.exists?("/etc/sphinxsearch/sphinx.conf")
   end
 end
+
+# Install nokogiri requirements
+package 'libxslt1-dev'
+package 'libxml2-dev'
