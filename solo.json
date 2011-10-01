@@ -1,5 +1,5 @@
 {
-	"dbuser": "map7",
+	"dbuser": "vps",
 	"dbpass": "mypasswd",
 	"run_list": [ 
 		"role[web_server]",
