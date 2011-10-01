@@ -107,3 +107,6 @@ end
 execute "Install readline" do
   command "cd $rvm_path/src/$(rvm tools strings)/ext/readline;sudo ruby extconf.rb; sudo make; sudo make install"
 end
+
+# RefineryCMS requirements
+package "imagemagick"
