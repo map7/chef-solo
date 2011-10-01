@@ -1,5 +1,6 @@
 {
 	"dbuser": "map7",
+	"dbpass": "mypasswd",
 	"run_list": [ 
 		"role[web_server]",
 		"recipe[sqlite]",
