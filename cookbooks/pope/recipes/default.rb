@@ -17,19 +17,30 @@ end
 # include the lines in your httpd.conf file.
 # 
 # Your rails app should be put into /var/www/<your app>
-file "/etc/apache2/httpd.conf" do
+file "/etc/apache2/mods-enabled/phusion.load" do
   owner "root"
   group "root"
   mode "0644"
-  backup 1
   action :create
   content "
 LoadModule passenger_module /usr/local/rvm/gems/ruby-1.9.2-p290/gems/passenger-3.0.7/ext/apache2/mod_passenger.so
 PassengerRoot /usr/local/rvm/gems/ruby-1.9.2-p290/gems/passenger-3.0.7
 PassengerRuby /usr/local/rvm/wrappers/ruby-1.9.2-p290/ruby
+"
+end
 
+file "/etc/apache2/sites-enabled/000-default" do
+  action :delete
+end
+
+file "/etc/apache2/sites-enabled/rails_project" do
+  owner "root"
+  group "root"
+  mode "0644"
+  action :create
+  content "
 #  <VirtualHost *:80>
-#     ServerName www.yourhost.com / hostname
+#     ServerName localhost / domain
 #     DocumentRoot /var/www/<app>/public    # <-- be sure to point to 'public'!
 #     <Directory /var/www/<app>/public>
 #        AllowOverride all              # <-- relax Apache security settings
