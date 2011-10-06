@@ -5,6 +5,8 @@
 # - Using a MCE compatible remote.
 # - Live in Australia (shepherd EPG)
 #
+home = ENV['HOME']
+user = ENV['SUDO_USER']
 
 # --- Install system tools
 package 'sysstat'
@@ -26,16 +28,20 @@ package 'gnome-do'
 package 'irda-utils'
 package 'xmacro'
 
-cookbook_file "#{ENV['HOME']}/.lirc/mythtv" do
+cookbook_file "#{home}/.lirc/mythtv" do
   source "mythtv"
   backup 2
   mode "0644"
+  owner user
+  group user  
 end
 
-cookbook_file "#{ENV['HOME']}/.lirc/irexec" do
+cookbook_file "#{home}/.lirc/irexec" do
   source "irexec"
   backup 2
   mode "0644"
+  owner user
+  group user  
 end
 
 # Shepherd requirements
