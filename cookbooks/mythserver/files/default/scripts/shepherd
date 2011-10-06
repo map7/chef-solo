@@ -1,0 +1,4969 @@
+#!/usr/bin/env perl
+
+our $progname = 'shepherd';
+my $version = '1.6.0';
+
+# tv_grab_au
+# "Shepherd"
+# A wrapper for various Aussie TV guide data grabbers
+#
+# Use --help for command-line options.
+#
+# Shepherd is an attempt to reconcile many different tv_grab_au scripts and
+# make one cohesive reliable data set. It works by calling a series of
+# scripts that grab data from a large variety of sources, and then
+# analysing the resulting XML data sets and determining which of the many
+# is the most reliable.
+
+# Shepherd runs in 5 stages:
+#  stage 1: Checks that all components are up-to-date, auto-updates if not.
+#  stage 2: calls grabbers to fill in missing data
+#  stage 3: calls reconciler to reconcile overlapping data and normalize
+#           programme titles to our preferred title
+#  stage 4: calls postprocessors to postprocess data 
+#           (e.g. flag HDTV programmes, augment with IMDb etc.)
+#  stage 5: write final XMLTV out
+
+BEGIN { *CORE::GLOBAL::die = \&my_die; }
+
+use strict;
+no strict 'refs';
+use warnings;
+use lib 'references';
+
+# ---------------------------------------------------------------------------
+# --- required perl modules
+# ---------------------------------------------------------------------------
+
+our $wiki = 'http://svn.whuffy.com/wiki';
+
+&require_module("Cwd", qw(realpath));
+&require_module("LWP::UserAgent");
+&require_module("Getopt::Long");
+&require_module("Data::Dumper");
+&require_module("XMLTV");
+&require_module("XMLTV::Ask");
+&require_module("POSIX", qw(strftime mktime getcwd));
+&require_module("Compress::Zlib");
+&require_module("Date::Manip");
+&require_module("Algorithm::Diff");
+&require_module("List::Compare");
+&require_module("Digest::SHA1");
+&require_module("Fcntl");
+
+# ---------------------------------------------------------------------------
+# --- Global Variables
+# ---------------------------------------------------------------------------
+#
+# Shared with libraries:
+#
+
+our $CWD = &find_home;
+-d $CWD or mkdir $CWD or die "Cannot create directory $CWD: $!";
+chdir($CWD);
+
+our $opt = {};
+our $debug = 0;
+our $region;
+our $channels;
+our $opt_channels;
+our $components = { };
+our $want_paytv_channels;
+our $pref_title_source;
+my $last_successful_run;
+our $hd_to_sds;
+
+# 
+# Not shared with libraries:
+#
+my $ARCHIVE_DIR = "$CWD/archive";
+my $LOG_DIR = "$CWD/log";
+
+my @options;
+my $mirror_site;    # obsolete
+my $sources;
+my $last_successful_run_data;
+my $last_successful_runs;
+my $components_pending_install = { };
+my $config_file =   "$CWD/$progname.conf";
+my $channels_file = "$CWD/channels.conf";
+my $log_file = "$progname.log";
+my $output_filename = "$CWD/output.xmltv";
+my $sysid = time.".".$$;
+my $pending_messages = { };
+my $starttime = time;
+my $any_data;
+my $lock;
+my $MAX_DAYS_HISTORY = 30;
+
+my $invoked = get_full_path($0);
+
+@{$hd_to_sds->{"ABC HD"}} = ("ABC1");
+@{$hd_to_sds->{"7HD"}} = ("Seven","Southern Cross","SCTV Central","Central GTS/BKN","Golden West");
+@{$hd_to_sds->{"Prime HD"}} = ("Prime");
+@{$hd_to_sds->{"Nine HD"}} = ("Nine","WIN","NBN","Imparja");
+@{$hd_to_sds->{"One HD"}} = ("One Digital");
+@{$hd_to_sds->{"SBS HD"}} = ("SBS ONE");
+
+
+# grabbing
+my $gscore;
+my $days = 8;
+my $missing;
+my $missing_unfillable;
+my $timeslice;
+my $grabbed;
+my $gmt_offset;
+my $data_found_all;
+my $data_satisfies_policy;
+my $find_microgaps;
+my $writer;
+my $components_used = $^O." ".$progname."(v".$version.")";
+
+# postprocessing
+my $langs = [ 'en' ];
+my $plugin_data = { };
+my $channel_data = { };
+my $reconciler_found_all_data;
+my $input_postprocess_file = "";
+
+# ---------------------------------------------------------------------------
+# --- Policies
+# ---------------------------------------------------------------------------
+# the following thresholds are used to control whether we keep calling grabbers or
+# not.
+
+my %policy;
+$policy{timeslot_size} = (2 * 60);      # 2 minute slots
+$policy{timeslot_debug} = 0;            # don't debug timeslot policy by default
+
+# PEAK timeslots -
+#  between 4.30pm and 10.30pm every day, only allow a maximum of
+#  15 minutes "programming data" missing
+#  if there is more than this, we will continue asking grabbers for more
+#  programming on this channel
+$policy{peak_max_missing} = 15*60;              # up to 15 mins max allowed missing
+$policy{peak_start} = (16*(60*60))+(30*60);     # 4.30pm
+$policy{peak_stop} = (22*(60*60))+(30*60);      # 10.30pm
+
+# NON-PEAK timeslots -
+#  between midnight and 7.15am every day, only allow up to 6 hours missing
+#  if there is more than this, we will continue asking grabbers for more
+#  programming on this channel
+$policy{nonpeak_max_missing} = 7*(60*60);       # up to 7 hours can be missing
+$policy{nonpeak_start} = 0;                     # midnight
+$policy{nonpeak_stop} = (7*(60*60))+(15*60);    # 7.15am
+
+# all other timeslots - (7.15am-4.30pm, 10.30pm-midnight)
+#  allow up to 60 minutes maximum missing programming
+$policy{other_max_missing} = 3*60*60;           # up to 3 hrs max allowed missing
+
+# don't accept programmes that last for longer than 12 hours.
+$policy{max_programme_length} = (12 * 60 * 60);  # 12 hours
+$policy{max_programme_length_opt_channels} = (18 * 60 * 60); # 18 hours
+
+
+# ---------------------------------------------------------------------------
+# --- Setup
+# ---------------------------------------------------------------------------
+
+&get_command_line_options(1);
+
+&capabilities if ($opt->{capabilities});
+&preferredmethod if ($opt->{preferredmethod});
+&description if ($opt->{description});
+
+$| = 1; 
+print STDERR "$progname v$version ($^O)\n\n" unless ($opt->{quiet});
+
+exit if ($opt->{version});
+&help if ($opt->{help});
+&dev_help if ($opt->{'dev-help'});
+
+&check_user;
+&invoke_correctly;
+&read_config_file;
+&check_region;
+&read_channels_file;
+&check_channels unless ($opt->{configure});
+&check_lock;
+&process_setup_commands;
+
+unless ($lock)
+{
+    print STDERR "ERROR: Another instance of Shepherd is already running. Exiting.\n";
+    exit 33;
+}
+
+&get_command_line_options(0) if (defined $components->{$progname}->{default_cmdline});
+
+&open_logfile unless ($opt->{nolog} or $opt->{update} or $opt->{configure});
+
+# ---------------------------------------------------------------------------
+# --- Update
+# ---------------------------------------------------------------------------
+
+if (!$opt->{skipupdate} and &update())
+{
+    &write_config_file;
+}
+
+if ($opt->{configure})
+{
+    &configure;
+}
+
+# ---------------------------------------------------------------------------
+# --- Go!
+# ---------------------------------------------------------------------------
+
+# If the previous run failed to complete, we'll have some pending stats:
+# deliver these.
+if (&report_stats)
+{
+    &write_config_file;
+}
+
+&test_output_file;
+
+unless ($opt->{update})
+{
+    if (defined $opt->{reoutput}) 
+    {
+	&log(2, "\nReturning cached output due to '--reoutput' flag.\n");
+	&output_data(1);
+	exit(0);
+    }
+
+    &check_last_run;
+    &calc_gmt_offset;
+    &commence_stats;
+    &calc_date_range;
+    &start_tor;
+
+    &grab_data("standard");
+
+    &grab_data("paytv") if (defined $want_paytv_channels);
+
+    &grab_data("expanded");	# Use C2 grabbers to fill missing sub-titles
+
+    $any_data = &reconcile_data;
+    if ($any_data)
+    {
+	&postprocess_data unless ($opt->{skippost});
+	&output_data;
+	&finalize_stats;
+	&report_stats;
+    }
+    else
+    {
+	&no_data;
+    }
+    &write_config_file;
+    &stop_tor;
+}
+
+&log("Done.\n");
+&close_logfile() unless $opt->{nolog};
+
+exit (!$any_data);
+
+# ---------------------------------------------------------------------------
+# --- Subroutines
+# ---------------------------------------------------------------------------
+
+# -----------------------------------------
+# Subs: Updates & Installations
+# -----------------------------------------
+
+sub update
+{
+    my $made_changes = 0;
+
+    &log("\nChecking for updates:\n");
+
+    # Sources
+    #
+    # Sources are where Shepherd looks for updates. Users can specify
+    # new sources as mirrors in case Shepherd's default source becomes
+    # unavailable, or for additional, unofficial functionality.
+
+    my (%datalist, %network_errors);
+    my $count = 0;
+    foreach my $site (@$sources)
+    {
+	$count++;
+	&log("Source #$count: $site\n");
+	my $data = fetch_file($site . 'status.csum?', undef, 1);
+	if ((!$data) || (!($data =~ /\nEND\n/)))
+	{
+	    &log(0, "Locking components owned by source $site due to network error.\n");
+	    $network_errors{$site} = 1;
+	    next;
+	}
+	my @source_components;
+	while ($data =~ /(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)/g)
+	{
+	    my ($progtype, $proggy, $latestversion, $csum1, $csum2) = ($1,$2,$3,$4,$5);
+	    if ($datalist{$proggy})
+	    {
+		&log(1, "Preferring previous source for $progtype $proggy\n");
+	    }
+	    else
+	    {
+		$datalist{$proggy} = { progtype => $progtype, 
+				       latestversion => $latestversion,
+				       csum1 => $csum1,
+				       csum2 => $csum2,
+				       source => $site
+				   };
+		push @source_components, $proggy;
+	    }
+
+	}
+	&log(1, "Source #$count has " . scalar(@source_components) . " components (" .
+	        join(', ', @source_components) . ")\n");
+    }
+
+    unless (keys %datalist)
+    {
+	&log("Skipping update.\n");
+	return 0;
+    }
+
+    &log("\n");
+
+    my %clist = %$components;
+
+    foreach my $stage (qw( application reference grabber reconciler postprocessor ))
+    {
+	foreach my $c (keys %datalist)
+	{
+	    my $proggy = $datalist{$c};
+	    next unless ($proggy->{progtype} eq $stage);
+	    if ($components->{$c} and $components->{$c}->{source} and $components->{$c}->{source} ne $proggy->{source} and $network_errors{$components->{$c}->{source}} and 1) # /* the unavailable source is preferred */)
+	    {
+		$proggy->{source} = $components->{$c}->{source};
+		$proggy->{csum1} = 'locked';
+	    }
+	    if (update_component($c, $proggy->{source}, $proggy->{latestversion}, $stage, $proggy->{csum1}, $proggy->{csum2}))
+	    {
+		$made_changes++;
+	    }
+	    delete $clist{$c};
+	}
+    }
+
+    # if user has set system to not update, then simply tell them if there are updates
+    if ((defined $opt->{noupdate}) && ($made_changes)) {
+	&log(2,"\n$made_changes components with pending updates, but --noupdate specified.\n".
+	       "It is recommended that you manually run --update at your earliest convenience,\n".
+		"as these updates may be for critical bugfixes!\n\n");
+	&countdown(20);
+	return 0;
+    }
+
+    # work out what components disappeared (if any)
+    foreach (keys %clist) {
+	unless ($components->{$_}->{disabled} or $network_errors{$components->{$_}->{source}}) {
+	    &log("\nDeleted component: $_.\n");
+	    disable($_, 2);
+	    $made_changes++;
+	}
+    }
+    $made_changes;
+}
+
+sub update_component
+{
+    my ($proggy, $source, $latestversion, $progtype, $csum1, $csum2) = @_;
+
+    my $ver = 0;
+    $ver = $components->{$proggy}->{ver} if (defined $components->{$proggy} and -e query_filename($proggy,$progtype));
+
+    my ($result, $action, $component_csum);
+
+    if ($components->{$proggy} and $components->{$proggy}->{disabled} and $components->{$proggy}->{disabled} == 1)
+    {
+	$action = 'DISABLED BY USER';
+    }
+    elsif ($csum1 eq 'locked')
+    {
+	$action = 'SOURCE LOCKED';
+    }
+
+    unless ($action)
+    {
+	$result = &versioncmp($ver, $latestversion);
+
+	if (!defined $opt->{noupdate}) {
+	    $action =  $result == -1 ? ($ver ? "UPGRADING" : "NEW") :
+	               $result ==  1 ? "DOWNGRADING" :
+	                               "up to date";
+	} else {
+	    $action =  $result == -1 ? ($ver ? "UPDATE AVAILABLE" : "NEW COMPONENT") :
+	               $result ==  1 ? "DOWNGRADE ADVISED" :
+	                               "up to date";
+	}
+    }
+
+    # if component is up-to-date, check it still works and isn't tainted (modified)
+    if (defined $result and $result == 0)
+    {
+	# check it still works
+        my $test_result = 1;
+        unless ($progtype eq 'application' 
+		or
+		($progtype eq 'reference' and $proggy !~ /^Shepherd\/.*\.pm$/)) 
+	{
+            $test_result = test_proggy($proggy, $progtype, undef, 1);
+        }
+
+        if (!$test_result) 
+	{
+            # broken
+	    $action = 'FAILED';
+            $plugin_data->{$proggy}->{failed_test} = 1;
+        } 
+	else 
+	{
+            # verify the component isn't tainted
+            $component_csum = csum_file(query_ldir($proggy, $progtype)."/".$proggy);
+            if ($component_csum ne $csum2) 
+	    {
+                # tainted
+		$action = 'TAINTED';
+	    }
+	}
+    }
+
+    &log(sprintf  "* %-54s%17s\n",
+		    ucfirst($progtype) . " $proggy" .
+			($ver ? " v$ver" : '') . 
+			($opt->{debug} ? ' [' . &shortsource($source) . ']' : '') .
+			"...",
+		    $action);
+
+    if ($action eq 'FAILED')
+    {
+	&log(2,"  For details, run Shepherd with --check option.\n");
+    }
+    if ($action eq 'TAINTED')
+    {
+	&log(2,"\nWARNING: Component '$proggy' ($progtype) has been modified/tainted\n".
+	       " -  expected checksum: $csum2\n".
+	       " -  actual checksum:   $component_csum\n\n");
+
+	# are we running a manual update?
+	if ($opt->{update}) {
+	    # yes - manually force the tainted module to be reinstalled
+	    $result = -1;
+	    &log("Forcing reinstall of $proggy due to existing component modified/tainted.\n".
+		 "If you DON'T wish this to happen CTRL-C now...\n");
+	     &countdown(15);
+	 } else {
+	     # no - whinge about the tainted module
+	     $plugin_data->{$proggy}->{tainted} = 1;
+	     $plugin_data->{tainted} = 1;
+	     $components_used .= "[tainted]" if ($proggy eq $progname);
+
+	     &log(2,"Modifying Shepherd or its components is not recommended.  If you have added\n".
+		    "functionality in some way, why not contribute it back?  See the wiki at\n".
+		    "$wiki for details.\n\n".
+		    "If you wish to revert $proggy back to the standard module, run ".ucfirst($progname)."\n".
+		    "with --update manually.\n\n");
+	     &countdown(10);
+	     &log(2,"\n\n");
+	 }
+     }
+
+    return $result if (defined $opt->{noupdate});
+
+    my $was_reenabled = 0;
+    # If this component was centrally disabled, re-enable it.
+    if ($components->{$proggy}->{'disabled'} and $components->{$proggy}->{'disabled'} == 2)
+    {
+	&log("Centrally disabled component \"$proggy\" is now available again.\n");
+	&enable($proggy, 2);
+	$was_reenabled = 1;
+    }
+
+    return $was_reenabled unless ($result);
+    install($proggy, $source, $latestversion, $progtype, $ver, $csum1, $csum2);
+    return 1;
+}
+
+sub csum_file
+{
+    my $file = shift;
+    my $sha1 = Digest::SHA1->new();
+
+    open(F,"<$file") || return -1;
+    $sha1->addfile(*F);
+    close(F);
+    return $sha1->hexdigest;
+}
+
+sub shortsource
+{
+    my $source = shift;
+    ($source =~ /(.*):\/+w*\.*(.*?)\//) ? $2 : $source;
+}
+
+sub install
+{
+    my ($proggy, $source, $latestversion, $progtype, $oldver, $csum1, $csum2) = @_;
+
+    my $config;
+    my $rdir = "";
+    my $basedir = $CWD."/".$progtype."s";
+    my $ldir = query_ldir($proggy, $progtype);
+    
+    -d $basedir or mkdir $basedir or die "Cannot create directory $basedir: $!\n";
+    -d $ldir or mkdir $ldir or die "Cannot create directory $ldir: $!\n";
+    if ($proggy =~ m"(.*)/")
+    {
+	-d "$ldir/$1" or mkdir "$ldir/$1" or die "Cannot create directory $ldir/$1: $!\n";
+    }
+    my $newfile = "$ldir/$proggy-$latestversion";
+
+    $rdir = $progtype . 's';
+    my $rfile = $source . "$rdir/$proggy";
+
+    # have we previously downloaded it but haven't been able to install it
+    # (due to a failed test or failed dependencies or something like that)?
+    if ((-e "$newfile") && (-s "$newfile") && (defined $components_pending_install->{$proggy})) {
+	&log("Appear to have previously downloaded $proggy v$latestversion.\n");
+	$config = Data::Dumper->Dump([$components_pending_install->{$proggy}->{config}], ["config"]);
+    } else {
+	&log("Downloading $proggy v$latestversion.\n");
+	return unless (fetch_file($rfile.'?', $newfile, 1, undef, $csum2));
+
+	# Make component executable
+	chmod 0755,$newfile unless ($progtype eq 'reference');
+    }
+
+    # Fetch config file
+    $rfile .= ".conf";
+    $config = fetch_file($rfile.'?', undef, 1, undef, $csum1) if (!defined $config);
+
+    return unless ($config); # everyone MUST have config files
+
+    eval $config;
+    if ($@) {
+	&log("Config file $rfile was invalid, not updating this component: $@\n");
+	return;
+    }
+
+    if ($progtype eq 'reference' and $proggy !~ /^Shepherd\/.*\.pm$/)
+    {
+	$components->{$proggy}->{ready} = 1;
+    }
+    else
+    {
+	# test that the component works BEFORE we install it
+	my $ready_test = test_proggy("$proggy", $progtype, $latestversion);
+	if (!$ready_test) {
+	    &log("$proggy v$latestversion failed ready test - marking as a pending update.\n");
+	    $components_pending_install->{$proggy}->{config} = $config;
+	    $components_pending_install->{$proggy}->{updated} = time;
+
+	    if (defined $components->{$proggy}) {
+		$components->{$proggy}->{admin_status} = sprintf "update to version %s pending: %s",
+		    $latestversion, $components_pending_install->{$proggy}->{admin_status};
+	    }
+
+	    return;
+	}
+	$components->{$proggy}->{ready} = $ready_test;
+    }
+
+    -d $ARCHIVE_DIR or mkdir $ARCHIVE_DIR or die "Cannot create directory $ARCHIVE_DIR: $!\n";
+
+    rename("$ldir/$proggy", "$ARCHIVE_DIR/$proggy") if (-e "$ldir/$proggy");
+    rename($newfile, "$ldir/$proggy");
+    
+    &log(1, "Installed $proggy v$latestversion.\n");
+
+    $components->{$proggy}->{type} = $progtype;
+    $components->{$proggy}->{ver} = $latestversion;
+    $components->{$proggy}->{config} = $config;
+    $components->{$proggy}->{source} = $source;
+    $components->{$proggy}->{updated} = time;
+    $components->{$proggy}->{admin_status} = sprintf "updated from v%s to v%s", ($oldver or 0), $latestversion;
+    delete $components_pending_install->{$proggy} if (defined $components_pending_install->{$proggy});
+
+    # if the update was for the main app, restart it
+    if ($proggy eq $progname) {
+	&write_config_file;
+
+	# special case for main app - we create a symlink also
+	unlink("$CWD/tv_grab_au","$CWD/shepherd");
+	eval { symlink($progtype.'s/'.$proggy.'/'.$proggy,"$CWD/tv_grab_au"); 1 };
+	eval { symlink($progtype.'s/'.$proggy.'/'.$proggy,"$CWD/shepherd"); 1 };
+
+	&log("\n*** Restarting ***\n\n");
+	&close_logfile unless $opt->{nolog};
+	push(@options,"--quiet") if $opt->{quiet};
+	exec("$ldir/$proggy @options"); # this exits
+	exit(0);
+    }
+
+    # If the update was for the channel_list reference, re-check
+    # the validity of channels (and migrate if necessary). Otherwise we won't
+    # use the new data until next run.
+    &check_channels if ($proggy eq 'channel_list');
+}
+
+sub test_proggy
+{
+    my ($proggy, $progtype, $specific_version, $quiet) = @_;
+
+    &log("Testing $progtype $proggy ... ") unless ($quiet);
+
+    my $progname = query_filename($proggy, $progtype);
+    $progname .= "-".$specific_version if ((defined $specific_version) && ($specific_version ne ""));
+
+    my $exec;
+    if ($progtype eq 'reference')
+    {
+	$exec = "perl -e 'require \"$progname\";'";
+    }   
+    else
+    {
+	$exec = $progname . ' ' . (&query_config($proggy, 'option_ready') or '--version');
+    }
+ 
+    &log(1, "\nExecuting: $exec\n") unless ($quiet);
+
+    my ($result,$resultmsg,$test_output) = call_prog($proggy, $exec,1,1,0, $progtype);
+    &log(1, "Return value: $result\n") unless ($quiet);
+
+    my $statusmsg;
+
+    if ($result)
+    {
+	unless ($quiet)
+	{
+	    &log("FAIL.\n\n".ucfirst($progtype) . " $proggy did not exit cleanly!\n");
+
+	    # can we give any more details on why it failed?
+	    if ($test_output and $test_output =~ /Can't locate (.*) in \@INC/) 
+	    {
+		my $modname = $1;
+		$modname =~ s#/#::#g;       # turn / into ::
+		$modname =~ s#\.pm##g;      # remove .pm suffix
+		$statusmsg = "Missing module \"$modname\"";
+
+		&log("Probably failed due to dependency on missing module '".$modname."'\n");
+	    }
+	    else
+	    {
+		&log("It may require configuration.\n");
+	    }
+
+	    &log(sprintf("\n<<<<<< output from $proggy was as follows:\n%s>>>>>> end output from $proggy\n\n",$test_output));
+	}
+	# set proggy status accordingly
+	unless ($statusmsg)
+	{
+	    $statusmsg = sprintf "return code %d%s", $result, ($resultmsg eq "" ? "" : ", '$resultmsg'");
+	}
+	$statusmsg = sprintf "FAILED (%s) on %s",
+			 $statusmsg,
+	                 POSIX::strftime("%a%d%b%y", localtime(time));
+    }
+    else
+    {
+	&log("OK.\n") unless ($quiet);
+
+	# mark as successful but only if previously unsuccessful
+	# (we only mark it if it was previously unsuccessful otherwise a --check
+	# will result in clearing out all of the admin_status fields)
+	$statusmsg = sprintf "tested successfully on %s", POSIX::strftime("%a%d%b%y", localtime(time))
+	  if ((defined $components->{$proggy}->{ready}) && (!$components->{$proggy}->{ready}));
+    }
+
+    # update status message
+    if ($statusmsg) {
+	if ($specific_version) {
+	    $components_pending_install->{$proggy}->{admin_status} = $statusmsg;
+	} elsif (defined $components->{$proggy}) {
+	    $components->{$proggy}->{admin_status} = $statusmsg;
+	}
+    }
+
+    return !$result;
+}
+
+sub enable
+{
+    return &enable_or_disable('enable', @_);
+}
+
+sub disable
+{
+    return &enable_or_disable('disable', @_);
+}
+
+sub enable_or_disable
+{
+    my ($which, $proggy, $n) = @_;
+
+    if ($proggy =~ /,/)
+    {
+	foreach (split(/,/, $proggy))
+	{
+	    &enable_or_disable($which, $_, $n);
+	}
+	return;
+    }
+
+    if ($proggy eq 'all')
+    {
+	foreach (keys %$components)
+	{
+	    next if ($_ eq $progname);
+	    &enable_or_disable($which, $_, $n);
+	}
+	return;
+    }
+    
+    return unless ($which eq 'enable' or $which eq 'disable');
+
+    unless ($components->{$proggy}) 
+    {
+	&log("No such component: \"$proggy\".\n");
+	return;
+    }
+
+    if ($components->{$proggy}->{type} eq "application") 
+    {
+        &log("Can't $which component: \"$proggy\".\n");
+        return;
+    }
+
+    if (($which eq 'enable') == !$components->{$proggy}->{disabled})
+    {
+	&log("Already " . $which . "d: $proggy.\n");
+	return;
+    }
+    &log(ucfirst($which) . "d $proggy.\n");
+    if ($which eq 'enable')
+    {
+	delete $components->{$proggy}->{disabled};
+    }
+    else
+    {
+	$n ||= 1;
+	$components->{$proggy}->{disabled} = $n;
+    }
+    $components->{$proggy}->{admin_status} = sprintf "%s %s on %s", 
+			(($n and $n == 2) ? 'centrally' : 'manually'),
+			$which . 'd', 
+			POSIX::strftime("%a%d%b%y", localtime(time));
+}
+
+sub check
+{
+    my $result;
+
+    &log("\nTesting all components...\n\n");
+
+    foreach my $proggy (sort keys %$components) {
+	my $progtype = $components->{$proggy}->{type};
+	next if ($progtype eq 'application');
+	next if ($progtype eq 'reference' and $proggy !~ /^Shepherd\/.*\.pm$/);
+	next unless (defined $components->{$proggy}->{'type'});
+
+	my $try_count = 0;
+
+RETRY:
+	$try_count++;
+	$result = test_proggy($proggy, $components->{$proggy}->{type});
+	$components->{$proggy}->{ready} = $result;
+
+	if ((!$result) && ($try_count < 2) && (query_config($proggy, 'option_config'))) {
+	    &log("Trying to configure '$proggy'\n");
+
+	    call_prog($proggy, query_filename($proggy, $progtype) . " ". query_config($proggy, 'option_config'));
+
+	    goto RETRY;
+	}
+    }
+
+    &test_tor;
+}
+
+sub pending
+{
+    return unless ($components_pending_install);
+
+    my @pending;
+    foreach (keys %$components_pending_install)
+    {
+	push @pending, $_;
+    }
+    unless (@pending)
+    {
+	&log("\nNo components are pending install.\n");
+	return;
+    }
+    &log("\nThe following components are pending install: " .
+	join(', ', @pending) . ".\n\n" .
+	"You may have missing Perl dependencies. To see errors,\n".
+	"run: $progname --update or $progname --check\n");
+
+    # Exit with non-zero status so this sub can be used to
+    # notify an external program (to email the owner, perhaps)
+    # about pending installs.
+    exit 1;
+}
+
+# Set this to a failure message as a default; if we complete successfully we'll change it.
+sub commence_stats
+{
+    &add_pending_message($progname, 'FAIL', $sysid, $starttime, 0, $region, 'incomplete');
+}
+
+sub finalize_stats
+{
+    delete $pending_messages->{$progname}->{FAIL};
+    &add_pending_message($progname, "SUCCESS", $sysid, $starttime, (time-$starttime), $region, $components_used);
+    
+    # Remove any MISSING_DATA from Shepherd we don't bother reporting.
+    if ($pending_messages->{$progname}->{MISSING_DATA})
+    {
+	# We don't care about Day 6 or later
+	my $stats_limit = $policy{starttime} - $policy{first_bucket_offset} + (6 * 86400);
+	&log(1, "SHEPHERD: Not reporting Shepherd missing data later than " . localtime($stats_limit) . ".\n");
+
+	$pending_messages->{$progname}->{MISSING_DATA} =~ s/(\d+)-(\d+)/$1 >= $stats_limit ? '' : "$1-$2"/eg;
+
+	# Clean up: drop duplicate commas, empty channel text
+	$pending_messages->{$progname}->{MISSING_DATA} =~ s/(?<!\d),+|,+(?!\d)//g;
+	$pending_messages->{$progname}->{MISSING_DATA} =~ s/[ \w]+:\t?(?!\d)//g;
+
+	# Anything left?
+	unless ($pending_messages->{$progname}->{MISSING_DATA} =~ /\d{6,}/)
+	{
+	    delete $pending_messages->{$progname}->{MISSING_DATA};
+	}
+    }
+
+    unless ($opt->{dontcallgrabbers})
+    {
+	$last_successful_run = time;
+	my $total_wanted = $plugin_data->{$progname}->{total_duration} + $plugin_data->{$progname}->{total_missing};
+	$last_successful_run_data = ($total_wanted ? 100* $plugin_data->{$progname}->{total_duration} / $total_wanted : 0);
+
+	$last_successful_runs->{$last_successful_run} = $last_successful_run_data;
+    }
+}
+
+# If no grabbers returned data, don't report individual component failures but rather
+# an overall Shepherd failure.
+sub no_data
+{
+    $pending_messages = undef;
+    &add_pending_message($progname, 'FAIL', $sysid, $starttime, (time-$starttime), ($region or 0), 'no data');
+}
+
+# Report any pending stats to main server.
+sub report_stats
+{
+    my $postvars = build_stats();
+    return unless $postvars;
+
+    if ($opt->{nonotify} or $opt->{dontcallgrabbers})
+    {
+	&log("Not posting usage statistics due to --" . ($opt->{nonotify} ? 'nonotify' : 'dontcallgrabbers' ) . " option.\n");
+	&log("Would have posted: ".Dumper($pending_messages)) if ($debug);
+    }
+    else
+    {
+	&log("Posting anonymous usage statistics.\n");
+	return 0 unless (fetch_file("http://www.whuffy.com/report.cgi", undef, 1, $postvars));
+    }
+
+    # successful post, clear out our pending messages
+    $pending_messages = undef;
+
+    return 1; # made changes
+}
+
+# gather pending messages
+sub build_stats
+{
+    return unless (keys %$pending_messages);
+
+    my $postvars = "";
+    my %postmsgs;
+
+    # If Shepherd failed last run, just report that, not MISSING_DATA as well
+    # (since the fact that we're missing data is almost certainly due to the
+    # fact that we failed).
+    if ($pending_messages->{$progname}
+	    and $pending_messages->{$progname}->{FAIL}
+	    and $pending_messages->{$progname}->{MISSING_DATA})
+    {
+	delete $pending_messages->{$progname}->{MISSING_DATA};
+    }
+
+    foreach my $component (keys %$pending_messages) {
+	foreach my $msgtype ( 'SUCCESS', 'FAIL', 'stats', 'MISSING_DATA') {
+	    if ($pending_messages->{$component}->{$msgtype}) {
+		$postmsgs{$component} .= urlify("\n".$component."\t") if (defined $postmsgs{$component});
+		$postmsgs{$component} .= urlify($msgtype."\t".$pending_messages->{$component}->{$msgtype});
+	    }
+	}
+    }
+
+    # shepherd first
+    $postvars = "$progname=$postmsgs{$progname}";
+
+    # the rest
+    foreach my $component (sort keys %postmsgs) {
+	next if ($component eq $progname);
+	$postvars .= sprintf "%s%s=%s",
+			     (length($postvars) > 0 ? "&" : ""),
+			     $component, $postmsgs{$component};
+    }
+
+    return $postvars;
+}
+
+# -----------------------------------------
+# Subs: Utilities
+# -----------------------------------------
+
+# versioncmp from Sort::Versions by Kenneth J. Albanowski
+sub versioncmp( $$ ) {
+
+    return -1 unless (@_ == 2 and $_[0] and $_[1]);
+
+    my @A = ($_[0] =~ /([-.]|\d+|[^-.\d]+)/g);
+    my @B = ($_[1] =~ /([-.]|\d+|[^-.\d]+)/g);
+
+    my ($A, $B);
+    while (@A and @B) {
+	$A = shift @A;
+	$B = shift @B;
+	if ($A eq '-' and $B eq '-') {
+	    next;
+	} elsif ( $A eq '-' ) {
+	    return -1;
+	} elsif ( $B eq '-') {
+	    return 1;
+	} elsif ($A eq '.' and $B eq '.') {
+	    next;
+	} elsif ( $A eq '.' ) {
+	    return -1;
+	} elsif ( $B eq '.' ) {
+	    return 1;
+	} elsif ($A =~ /^\d+$/ and $B =~ /^\d+$/) {
+	    if ($A =~ /^0/ || $B =~ /^0/) {
+		return $A cmp $B if $A cmp $B;
+	    } else {
+		return $A <=> $B if $A <=> $B;
+	    }
+	} else {
+	    $A = uc $A;
+	    $B = uc $B;
+	    return $A cmp $B if $A cmp $B;
+	}	
+    }
+    @A <=> @B;
+}
+
+sub get_full_path
+{
+    my $path = shift;
+    my $real = realpath($path);
+    return $path if (!$real);
+    return $real;
+}
+
+sub require_module
+{
+    my ($mod, @imports) = @_;
+
+    my $modname = $mod.".pm";
+    $modname =~ s/::/\//g;
+
+    eval { require $modname; };
+    if ($@) {
+	&log("\nERROR:\nMandatory module '$mod' not found.\n\n" .
+	     "Please see the Wiki at ".$wiki."/Installation\n" .
+	     "for details on how to install this module.\n", 1);
+	exit(1);
+    }
+
+    import $mod @imports;
+}
+
+# check that user isn't root, warn them if they are!
+sub check_user
+{
+    if ($< == 0) {
+	&log(2, "WARNING:\n You are running ".ucfirst($progname).
+	        " as 'root' super-user.\n".
+	        " It is HIGHLY RECOMMENDED that you set your system to run ".
+	        ucfirst($progname)."\n from within a normal user account!\n\n", 1);
+	&countdown(10);
+    }
+}
+
+sub invoke_correctly
+{
+    &log(1, "Home: $CWD\n");
+    my $wanted_prog = get_full_path(query_filename('shepherd','application'));
+    if (($invoked ne $wanted_prog) && (!$opt->{configure}))
+    {
+        if (-e $wanted_prog)
+        {
+	    &log("\n*** Application/user mismatch ***\n".
+		   "    You invoked: $invoked\n".
+		   "    Instead of : $wanted_prog\n" .
+                 "\n*** Restarting ***\n\n");
+            &close_logfile unless $opt->{nolog};
+            exec("$wanted_prog @options");
+            # This exits.
+            exit(0);
+        }
+
+        &log("\n*** Installing Shepherd into $CWD ***\n\n" .
+	     "If this is not what you intend, CTRL-C now.\n");
+        &countdown();
+    }
+}
+
+# if last run was successful and was less than 22 hours ago, refuse to run.
+# there's really no point calling shepherd more frequently than this.
+sub check_last_run
+{
+    return if (!defined $last_successful_run);
+    my $last_ran_secs_ago = time - $last_successful_run;
+
+    &log(0,"\n".ucfirst($progname)." last ran successfully ".pretty_duration($last_ran_secs_ago)." ago.\n");
+
+    return if ($last_ran_secs_ago > (22*60*60));
+    return if ($opt->{dontcallgrabbers});
+
+    # enforce hard limit
+    my $num_runs = 0;
+    my $earliest_run = time;
+    foreach my $when (sort {$b <=> $a} keys %{$last_successful_runs}) {
+	if (($when + (86400 * $MAX_DAYS_HISTORY)) < time) {
+	    delete $last_successful_runs->{$when}; # age out old entries
+	    next;
+	}
+
+	if ($when >= (time - (86400*7))) {
+	    $num_runs++;
+	    $earliest_run = $when if ($num_runs == 30);
+	}
+    }
+    if ($num_runs >= 30) {
+	&log(2, "\n*** ERROR: EXTREME OVERUSE ***\n\n".
+	    "Shepherd has run to completion more than 30 times in the last 7 days!\n".
+	    "To avoid overloading datasources, Shepherd will now exit.\n\n".
+	    "PLEASE NOTE: There is usually NO BENEFIT in running Shepherd more than once\n".
+	    "per day. Overuse can lead to datasources becoming unavailable for all users.\n\n".
+	    "TO AVOID THIS ERROR: Please do not run Shepherd more than once or twice per\n".
+	    "day. Shepherd is now in a locked state. To unlock Shepherd, wait \n".
+	    pretty_duration((7*86400)-(time-$earliest_run)).
+	    ". Alternately, you may reinstall Shepherd.\n\n".
+	    "Please do not abuse Shepherd. All users depend on your courtesy.\n\n");
+
+	exit(10);
+    }
+
+    if (defined $opt->{notimetest}) {
+	&log(2, "\n** SPECIAL OPERATION **\n" .
+		"Shepherd thinks it doesn't need to compile new data, as it\n" .
+		"recently completed a successful run. Running anyway due to\n" .
+		"--notimetest option. Please do NOT make a habit of this, as\n" .
+		"it risks straining resources needed by all Shepherd users.\n\n");
+	&countdown(10);
+	return;
+    }
+
+    &log("!! Shepherd has successfully completed a run less than 22 hours ago.\n" .
+	 "!! Exiting to avoid wasting time and bandwidth.\n\n" .
+	 "If you wish Shepherd to re-output the data it gathered last run,\n" .
+	 "use the --reoutput option (e.g. 'tv_grab_au --reoutput'). To do this\n" .
+	 "via mythfilldatabase, use 'mythfilldatabase -- --reoutput'. (Or,\n".
+	 "for older versions, 'mythfilldatabase --graboptions --reoutput'.)\n\n" .
+	 "If you wish to force Shepherd to re-compile guide data from scratch,\n" .
+	 "even though you seem to already have fresh data, use the --notimetest\n" .
+	 "option (e.g. 'tv_grab_au --notimetest'). However, this should ONLY be\n".
+	 "used for testing. If you call Shepherd too often with --notimetest,\n" .
+	 "it will lock down and refuse to run, to prevent straining resources\n" .
+	 "needed by all Shepherd users.\n");
+	
+    exit(0);
+}
+
+# Somehow some users are ending up with no region
+sub check_region
+{
+    unless ($opt->{configure} or ($region and $region =~ /^\d+$/))
+    {
+	&log(2, "No or invalid region set! " . ucfirst($progname) . " must be configured.\n");
+	$opt->{configure} = 1;
+	$region = undef;
+    }
+}
+
+# Make sure the user hasn't edited the config file to try to support
+# additional channels. This seems to happen reasonably often, and
+# (a) makes Shepherd waste time and bandwith looking for unsupported channels,
+# and (b) confuses our stats.
+sub check_channels
+{
+    my @supported_channels = &read_official_channels($region);
+    unless (@supported_channels)
+    {
+	&log("Skipping channel check.\n");
+	return;
+    }
+    my $checked_migration;
+    foreach my $ch (keys %$channels)
+    {
+	unless (grep($_ eq $ch, @supported_channels))
+	{
+	    # check this isn't the result of a channel migration
+	    unless ($checked_migration)
+	    {
+		&migrate_channels;
+		$checked_migration = 1;
+		redo;
+	    }
+	    
+	    # We may have removed it via migration
+	    next unless ($channels->{$ch});
+
+	    &log("Ignoring unsupported channel for region $region: \"$ch\"\n");
+	    delete $channels->{$ch};
+	    if ($opt_channels->{$ch.'HD'})
+	    {
+		&log("Ignoring related HD channel: \"$ch" . "HD\"\n");
+		delete $opt_channels->{$ch.'HD'};
+	    }
+	}
+    }
+
+    if (defined $want_paytv_channels) {
+	my @supported_paytv_channels = &read_official_channels($want_paytv_channels);
+	unless (@supported_paytv_channels)
+	{
+	    &log("Skipping paytv channel check.\n");
+	    return;
+	}
+	my $checked_migration;
+	foreach my $ch (keys %$opt_channels)
+	{
+	    unless (grep($_ eq $ch, @supported_paytv_channels) || grep($_.'HD' eq $ch, @supported_channels))
+	    {
+		# check this isn't the result of a channel migration
+		unless ($checked_migration)
+		{
+		    &migrate_paytv_channels;
+		    $checked_migration = 1;
+		    redo;
+		}
+
+		# We may have removed it via migration
+		next unless ($opt_channels->{$ch});
+
+		&log("Ignoring unsupported channel for $want_paytv_channels: \"$ch\"\n");
+		delete $opt_channels->{$ch};
+	    }
+	}
+    }
+
+    &migrate_hd_channels;
+
+    &check_channel_xmltvids;
+}
+
+sub read_official_channels
+{
+    my $reg = shift;
+    return unless ($reg);
+
+    my $fn = 'references/channel_list/channel_list';
+    unless (open (FN, $fn))
+    {
+        &log("ERROR: Unable to open $fn!\n");
+        return;
+    }
+    while (my $line = <FN>)
+    {
+        return split(/,/, $1) if ($line =~ /^$reg:(.*)/);
+    }
+    &log("ERROR: Unable to find region \"$reg\" in $fn\n");
+}
+
+# This is called when we download a new channels_file reference.
+# We check the migration info in that file and rename any channels 
+# as appropriate.
+sub migrate_channels
+{
+    &log("Checking for channel migrations...\n");
+
+    my $fn = 'references/channel_list/channel_list';
+    unless (open (FN, $fn))
+    {
+	&log("ERROR: Unable to open $fn!\n");
+	return;
+    }
+
+    my $write_config = 0;
+    my $mflag = 0;
+    while (my $line = <FN>)
+    {
+	$mflag = 1 if ($line =~ /---migrate---/);
+	next unless ($mflag);
+
+	# Look for our region number before the first colon.
+	# EG These all match region 126:
+	# 126:TEN->SC10
+	# 126,254,255:TEN->SC10
+	# *:TEN->SC10
+	next unless ($line =~ /^[^:]*\b$region\b.*?:(.*)/ or $line =~ /^\*:(.*)/);
+
+	my $migrations = $1;
+	if ($migrations =~ /(.*?):(.*?):(.*)/) {
+		my $to_region = $1;
+		my $need_channel = $2;
+		$migrations = $3;
+
+		if (($need_channel =~ /^!(.*)$/ && !defined($channels->{$1})) ||
+				defined $channels->{$need_channel}) {
+			&log("Migrating region \"$region\" to \"$to_region\".\n");
+			$region = $to_region;
+			$write_config = 1;
+		} else {
+			next;
+		}
+	}
+	my @migrations = split(/,/, $migrations);
+	foreach (@migrations)
+	{
+	    my ($from, $to) = split /->/;
+	    if ($channels->{$from})
+	    {
+		&log("Migrating channel \"$from\" to \"$to\".\n");
+		$channels->{$to} = $channels->{$from};
+		delete $channels->{$from};
+		$mflag = 2;
+		if ($opt_channels->{$from.'HD'})
+		{
+		    $from .= 'HD';
+		    $to .= 'HD';
+		    &log("Migrating HD channel \"$from\" to \"$to\".\n");
+		    $opt_channels->{$to} = $opt_channels->{$from};
+		    delete $opt_channels->{$from};
+		}
+	    }
+	}
+    }
+    if ($mflag == 2)
+    {
+	&log("Updating channels file.\n");
+	&write_channels_file;
+    }
+	if ($write_config) {
+		&log("Updating config file.\n");
+		&write_config_file;
+	}
+}
+
+sub migrate_paytv_channels
+{
+    &log("Checking for paytv channel migrations...\n");
+
+    my $fn = 'references/channel_list/channel_list';
+    unless (open (FN, $fn))
+    {
+	&log("ERROR: Unable to open $fn!\n");
+	return;
+    }
+
+    my $mflag = 0;
+    while (my $line = <FN>)
+    {
+	$mflag = 1 if ($line =~ /---migrate---/);
+	next unless ($mflag);
+	next unless ($line =~ /^$want_paytv_channels:(.*)/);
+	my @migrations = split(/,/, $1);
+	foreach (@migrations)
+	{
+	    my ($from, $to) = split /->/;
+	    if ($opt_channels->{$from})
+	    {
+		&log("Migrating channel \"$from\" to \"$to\".\n");
+		$opt_channels->{$to} = $opt_channels->{$from};
+		delete $opt_channels->{$from};
+		$mflag = 2;
+	    }
+	}
+    }
+    if ($mflag == 2)
+    {
+	&log("Updating channels file.\n");
+	&write_channels_file;
+    }
+}
+
+sub migrate_hd_channels
+{
+    my $write = 0;
+
+    # migrate to high definition channels
+    foreach my $hdchannel (keys %$hd_to_sds) {
+	if (!exists $channels->{$hdchannel}) { # annoyingly if they don't want 7HD this loops everytime
+		foreach my $sdchannel (@{$hd_to_sds->{$hdchannel}}) {
+			if (exists $opt_channels->{$sdchannel.'HD'}) {
+				# there can be only one 7HD channel
+				$channels->{$hdchannel} = $opt_channels->{$sdchannel.'HD'};
+				delete $opt_channels->{$sdchannel.'HD'};
+				&log("Migrating channel \"${sdchannel}HD\" to \"$hdchannel\".\n");
+				$write = 1;
+				last;
+			}
+		}
+	}
+    }
+
+    if ($write == 1) {
+	&log("Updating channels file.\n");
+	&write_channels_file;
+    }
+}
+
+# Ensure that every channel has a unique XMLTV ID
+sub check_channel_xmltvids
+{
+    my $xmltvids = { };
+    &check_channel_xmltvids_loop($channels, $xmltvids);
+    &check_channel_xmltvids_loop($opt_channels, $xmltvids);
+}
+
+sub check_channel_xmltvids_loop
+{
+    my ($cref, $xmltvids) = @_;
+
+    foreach my $ch (keys %$cref)
+    {
+	if ($xmltvids->{$cref->{$ch}})
+	{
+	    &log(sprintf "WARNING: dropping channel %s: XMLTV ID of \"%s\" conflicts with %s\n",
+		         $ch, $cref->{$ch}, $xmltvids->{$cref->{$ch}});
+	    delete $cref->{$ch};
+	}
+	else
+	{
+	    $xmltvids->{$cref->{$ch}} = $ch;
+	}
+    }
+}
+
+sub query_grabbers
+{
+    my ($conf, $val) = @_;
+    return query_component_type('grabber',$conf,$val);
+}
+
+sub query_reconcilers
+{
+    return query_component_type('reconciler');
+}
+
+sub query_postprocessors
+{
+    return query_component_type('postprocessor');
+}
+
+sub query_component_type
+{
+    my ($progtype,$conf,$val) = @_;
+
+    my @ret = ();
+    foreach (keys %$components)
+    {
+	if ($components->{$_}->{type} and $components->{$_}->{type} eq $progtype) {
+	    if (defined $conf) {
+		push (@ret, $_) if (query_config($_,$conf) eq $val);
+	    } else {
+		push (@ret, $_);
+	    }
+	}
+    }
+    return @ret;
+}
+
+sub query_name
+{
+    my $str = shift;
+    if ($str =~ /(.*) \[cache\]/)
+    {
+	return $1;
+    }
+    return $str;
+}
+
+sub query_filename
+{
+    my ($proggy, $progtype) = @_;
+    return query_ldir($proggy,$progtype).'/'.$proggy;
+}
+
+sub query_ldir
+{
+    my ($proggy, $progtype) = @_;
+    return $CWD.'/'.$progtype.'s' if ($proggy =~ /\.pm$/);
+    return $CWD.'/'.$progtype.'s/'.$proggy;
+}
+
+sub query_config
+{
+    my ($grabber, $key) = @_;
+
+    $grabber = query_name($grabber);
+    return undef unless ($components->{$grabber});
+    return $components->{$grabber}->{config}->{$key};
+}
+
+sub countdown
+{
+    my ($n, $contstring) = @_;
+
+    $n ||= 10;
+    $contstring ||= "Continuing";
+
+    &log(2, "You may wish to CTRL-C and fix this.\n\n$contstring anyway in:");
+    foreach (1 .. $n)
+    {
+	&log(2, " " . ($n + 1 - $_));
+	sleep 1;
+    }
+    &log(2, "\n");
+}
+
+sub rotate_logfiles
+{
+    # keep last 30 log files
+    my $num;
+    for ($num = 30; $num > 0; $num--) {
+	my $f1 = sprintf "%s/%s.%d.gz",$LOG_DIR,$log_file,$num;
+	my $f2 = sprintf "%s/%s.%d.gz",$LOG_DIR,$log_file,$num+1;
+	unlink($f2);
+	rename($f1,$f2);
+    }
+
+    my $f1 = sprintf "%s/%s",$LOG_DIR,$log_file;
+    my $f2 = sprintf "%s/%s.1",$LOG_DIR,$log_file;
+    rename($f1,$f2);
+}
+
+sub compress_file
+{
+    my $infile = shift;
+    my $outfile = sprintf "%s.gz",$infile;
+    my $gz;
+
+    if (!(open(INFILE,"<$infile"))) {
+	warn "could not open file $infile for reading: $!\n";
+	return;
+    }
+
+    if (!($gz = gzopen($outfile,"wb"))) {
+	warn "could not open file $outfile for writing: $!\n";
+	return;
+    }
+
+    while (<INFILE>) {
+	my $byteswritten = $gz->gzwrite($_);
+	warn "error writing to compressed file: error $gz->gzerror"
+	  if ($byteswritten == 0);
+    }
+    close(INFILE);
+    $gz->gzclose();
+    unlink($infile);
+}
+
+sub open_logfile
+{
+    unless (-d $LOG_DIR or mkdir $LOG_DIR)
+    {
+        print "Cannot create directory $LOG_DIR: $!";
+	return;
+    }
+
+    &rotate_logfiles;
+    &log(1, "Logging to: $log_file\n");
+    unless (open(LOG_FILE,">>$LOG_DIR/$log_file"))
+    {
+	print "Can't open log file $LOG_DIR/$log_file for writing: $!\n";
+	return;
+    }
+
+    my $now = localtime(time);
+    printf LOG_FILE "$progname v$version started at $now\n";
+    printf LOG_FILE "Invoked as: $invoked ".join(" ",@options)."\n";
+    printf LOG_FILE "System ID: $sysid ($^O)\n\n";
+
+    my $old_log_file = $LOG_DIR."/".$log_file.".1";
+    compress_file($old_log_file) if (-f $old_log_file);
+}
+
+sub close_logfile
+{
+    close(LOG_FILE);
+}
+
+# Optionally sent a loglevel as first arg:
+#  0: print to STDERR unless sent --quiet (default)
+#  1: print to STDERR if sent --debug, unless sent --quiet
+#  2: print to STDERR
+# In all cases, output will be printed to the logfile. To stop this,
+# use --nolog.
+sub log
+{
+    my $loglevel = shift;
+
+    my $entry;
+    if ($loglevel =~ /^\d$/)
+    {
+        $entry = shift;
+    }
+    else
+    {
+        $entry = $loglevel;
+        $loglevel = 0;
+    }
+    if ($loglevel == 2 or (!$opt->{'quiet'} and ($loglevel == 0 or $debug)))
+    {
+        print STDERR $entry;
+    }
+    print LOG_FILE $entry if (fileno(*LOG_FILE) and !$opt->{nolog});
+}
+
+sub call_prog
+{
+    my ($component,$prog,$want_output,$timeout,$display_output,$progtype) = @_;
+
+    $timeout = 0 if (!defined $timeout);
+    $want_output = 0 if (!defined $want_output);
+    $display_output = 1 if (!defined $display_output);
+    $progtype = $components->{$component}->{type} unless ($progtype);
+    if ($components->{$component}->{default_cmdline})
+    {
+	my $parameters = $components->{$component}->{default_cmdline};
+	$parameters =~ s/:/ /g;
+	$prog .= " $parameters";
+    }
+
+    my $prog_output = "";
+
+    chdir (query_ldir($component, $progtype));
+
+    my $exec = sprintf "PERL5LIB=\"%s/references\" %s 2>&1|", $CWD, $prog;
+    unless (open(PROG,$exec)) {
+	&log("warning: couldn't exec $component as \"$prog\": $!\n");
+	chdir $CWD;
+	return(-1,"open failed",$prog_output);
+    }
+
+    &log("\n:::::: Output from $component\n") if ($display_output);
+
+    my $msg;
+    eval {
+	local $SIG{ALRM};
+	if ($timeout > 0) {
+	    $timeout = 20 if ($timeout < 20);
+	    $SIG{ALRM} = sub { die "alarm\n"; };
+	    alarm $timeout; # set alarm
+	}
+	while(<PROG>) {
+	    $msg = $_;
+	    &log(": $msg") if ($display_output);
+	    $prog_output .= $msg if ($want_output);
+	    &add_pending_message($component, 'stats', $1) if ($msg =~ /^STATS: (.*)/);
+
+	}
+	alarm(0) if ($timeout > 0); # cancel alarm
+	close(PROG);
+    };
+
+    chdir $CWD;
+
+    &log(":::::: End output from $component\n\n") if ($display_output);
+
+    if ($@) {
+	die unless $@ eq "alarm\n";   # propagate unexpected errors
+
+	# timeout
+	&log(ucfirst($component) . " ran for $timeout seconds, stopping it.\n");
+	close(PROG);
+    }
+
+    if ($? == -1) {
+	&log("Failed to execute $component: $!\n");
+	return (-1,"Failed to execute",$prog_output);
+    }
+    if ($msg)
+    {
+	chomp $msg;
+	$msg =~ s/(.*) at .*\/(.*)/$1 at $2/g;
+    }
+    if ($? & 127) {
+	&log((sprintf "%s died with signal %d, %s coredump\n",
+	     ucfirst($component), ($? & 127),  (($? & 128) ? "with" : "without")));
+	return (($? & 127), "Died:$msg", $prog_output);
+    } 
+
+    return (0,"",$prog_output) unless ($? >> 8);
+    return (($? >> 8), $msg, $prog_output);
+}
+
+sub fetch_file
+{
+    my ($url, $store, $id_self, $postvars, $csum) = @_;
+    my $request;
+
+    # Need to drop cache-defeating final '?' if looking for local file
+    $url = $1 if ($url =~ /^(file:\/\/\/.*)\?$/);
+
+    &log(1, "Fetching $url.\n");
+    
+    my $ua = LWP::UserAgent->new();
+    $ua->env_proxy;
+    if ($id_self)
+    {
+	$ua->agent(ucfirst("$progname/$version"));
+    }
+    else
+    {
+	$ua->agent('Mozilla/4.0 (compatible; MSIE 7.0; Windows NT 5.1; .NET CLR 1.1.4322');
+    }
+
+    if (defined $postvars) {
+	$request = HTTP::Request->new(POST => $url);
+	$request->add_content($postvars);
+    } else {
+	$request = HTTP::Request->new(GET => $url);
+    }
+    $request->header('Accept-Encoding' => 'gzip');
+
+    my $response = $ua->request($request);
+    if ($response->is_success())
+    {
+	if ($response->header('Content-Encoding') &&
+	    $response->header('Content-Encoding') eq 'gzip') {
+	    $response->content(Compress::Zlib::memGunzip($response->content));
+	}
+
+	# check the checksum
+	if (defined $csum) {
+	    my $sha1 = Digest::SHA1->new();
+	    $sha1->add($response->content);
+	    my $rcsum = $sha1->hexdigest;
+	    if ($rcsum ne $csum) {
+		&log("$url corrupt: expected checksum $csum but got ".$rcsum."\n");
+		return undef;
+	    }
+	}
+
+	if ($store)
+	{
+	    open (FILE, ">$store") 
+		or (&log("ERROR: Unable to open $store for writing: $!.\n") and return undef);
+	    print FILE $response->content();
+	    close FILE;
+
+	    # re-check checksum of saved file if we have a checksum to compare against
+	    if (defined $csum) {
+		my $rcsum = &csum_file($store);
+		if ($rcsum ne $csum) {
+		    &log("ERROR: file $store corrupt: expected checksum $csum but got ".$rcsum.".\n".
+			 "       Maybe the filesystem is full? I/O error code was $!.\n");
+		    return undef;
+		}
+	    }
+
+	    return 1;
+	}
+	else 
+	{
+	    return $response->content();
+	} 
+    }
+    &log("Failed to retrieve $url: " . $response->status_line() . "\n");
+    return undef;
+}
+
+sub add_pending_message
+{
+    my ($component, $field, @rest) = @_;
+
+    &log("SHEPHERD: Set pending message: $component $field @rest\n") if ($debug);
+    my $iteration = 0;
+    my $componentname = $component;
+    if ($component ne $progname)
+    {
+	while (defined $pending_messages->{"$component-$iteration"}->{SUCCESS}
+		or
+	       defined $pending_messages->{"$component-$iteration"}->{FAIL})
+	{
+	    $iteration++;
+	    last if ($iteration > 19); # just in case
+	}
+	$componentname = "$component-$iteration";
+    }
+    $pending_messages->{$componentname}->{$field} = join("\t",@rest);
+}
+
+sub urlify
+{
+    my $str = shift;
+    $str =~ s/([^A-Za-z0-9])/sprintf("%%%02X", ord($1))/seg;
+    return $str;
+}
+
+# Try to find a sensible place to put Shepherd files. Default is ~/.shepherd/
+sub find_home
+{
+    my $home = $ENV{HOME};
+    $home = undef if ($home eq '/' or $home eq '');
+    if (!$home and $ENV{USER})
+    {
+	foreach ( "/home/$ENV{USER}", "/usr/home/$ENV{USER}", "/$ENV{USER}" )
+	{
+	    if (-o $_ and -d $_)
+	    {
+		$home = $_;
+		last;
+	    }
+	}
+    }
+    if ($home)
+    {
+	$home =~ s'/$'';
+	return "$home/.$progname";
+    }
+    return "/opt/$progname";
+}
+
+# -----------------------------------------
+# Subs: Setup
+# -----------------------------------------
+
+sub read_config_file
+{
+    read_file($config_file, 'configuration');
+    &log(1,"System ID: $sysid\n");
+
+    # shepherd.conf bug fixes
+    # 04/08/07 - added selectv_website
+    $want_paytv_channels = 'Foxtel' if (defined $want_paytv_channels && $want_paytv_channels eq 1); 
+    # 29/08/07 - removed abc2_website as a preferred title source
+    $pref_title_source = 'yahoo7widget'
+	    if (defined $pref_title_source && $pref_title_source eq 'yahoo7widget,abc2_website');
+    delete $components->{'abc2_website'} if (defined $components &&
+	    defined $components->{'abc2_website'} && !defined $components->{'abc2_website'}->{'ver'});
+    # 27/06/08 - removed jrobbo as a preferred title source
+    $pref_title_source = undef
+	    if (defined $pref_title_source && $pref_title_source eq 'jrobbo');
+    delete $components->{'jrobbo'} if (defined $components &&
+	    defined $components->{'jrobbo'} && !defined $components->{'jrobbo'}->{'ver'});
+
+    # Migrate from 'mirror_site' to new 'sources'
+    unless ($sources)
+    {
+	&log("Defining default source.\n");
+	&reset_sources;
+	# Components with no source are assigned to whuffy
+	foreach (keys %$components)
+	{
+	    $components->{$_}->{source} ||= 'http://www.whuffy.com/shepherd/';
+	}
+    }
+	
+    if ($mirror_site)
+    {
+	print "Migrating mirrors to sources.\n";
+	foreach my $site (split (/,/, $mirror_site))
+	{
+	    $site = "$site/" unless ($site =~ /\/$/);
+	    push(@$sources, $site);
+	}
+	$mirror_site = undef;
+    }
+}
+
+sub read_channels_file
+{
+    read_file($channels_file, 'channels');
+}
+
+sub read_file
+{
+    my $fn = shift;
+    my $name = shift;
+
+    print STDERR "Reading $name file: $fn\n" unless ($opt->{quiet});
+    unless (-r $fn)
+    {
+	unless ($opt->{configure})
+	{
+	    print "\nNo $name file found.\n" .
+		  ucfirst($progname) . " must be configured: " .
+		  "configuring now.\n\n";
+	    $opt->{'configure'} = 1;
+	    $opt->{'nolog'} = 1;
+	}
+	return;
+    }
+    local (@ARGV, $/) = ($fn);
+    no warnings 'all';
+    eval <>;
+    if ($@ and !$opt->{configure})
+    {
+	warn "\nERROR in $name file! Details:\n$@";
+	&countdown();
+    }
+}
+
+sub write_config_file
+{
+    write_file($config_file, 'configuration', 
+	[$region,  $pref_title_source,  $want_paytv_channels,  $sysid,  $last_successful_run, $last_successful_run_data, $last_successful_runs, $sources, $components,  $components_pending_install,  $pending_messages ],
+	["region", "pref_title_source", "want_paytv_channels", "sysid", "last_successful_run", "last_successful_run_data", "last_successful_runs", 'sources', "components", "components_pending_install", "pending_messages" ]);
+}
+
+sub write_channels_file
+{
+    write_file($channels_file, 'channels',
+	[ $channels,  $opt_channels ],
+	[ 'channels', 'opt_channels' ]);
+}
+
+sub write_file
+{
+    my ($fn, $name, $vars, $varnames) = @_;
+    open (FN, ">$fn") or die "Can't write to $name file $fn: $!";
+    print FN Data::Dumper->Dump($vars, $varnames);
+    close FN;
+    &log(1, "SHEPHERD: Wrote $name file $fn.\n");
+}
+
+sub get_command_line_options
+{
+  my $use_argv = shift;
+
+  if ($use_argv) {
+    # Record so we can pass the unmodified args to components later
+    @options = @ARGV;	# Record so we can pass the unmodified args to components later
+    push (@options,"") if ($#options == -1); # silence warnings if none
+
+    # filter what options we don't pass on ..
+    foreach (0..$#options) {
+	next if (!$options[$_]);
+
+	splice(@options,$_,2) if ($options[$_] =~ /^--config-file/); 	# don't pass on "--config-file (file)"
+	next if (!$options[$_]);
+	splice(@options,$_,1) if ($options[$_] =~ /^--quiet/);		# never be quiet
+    }
+  } else {
+    push(@ARGV,split(/:/,$components->{$progname}->{default_cmdline}));
+  }
+
+  Getopt::Long::Configure(qw/pass_through/);
+
+  GetOptions($opt, qw(	config-file=s
+			help
+                        dev-help
+			configure:s
+			setpreftitle=s
+			clearpreftitle
+			capabilities
+			preferredmethod
+			description
+			quiet
+			notquiet
+			version
+			debug
+			status
+			desc
+			show-config
+			show-channels
+			update
+			noupdate
+			skipupdate
+			skippost
+			disable=s
+			enable=s
+			component-set=s
+			delete=s
+			nolog
+			nonotify
+			notimetest
+			check
+			reset
+                        dontcallgrabbers
+                        days=i
+                        offset=i
+                        output=s
+			nooutput
+                        randomize
+			pending
+			grabwith=s
+			list-chan-names
+			set-icons
+			configure-mythtv
+			ancestry=s
+			history
+			sources
+			addsource=s
+			delsource=s
+			mode=s
+			daily
+			reoutput
+		     ));
+  $debug = $opt->{debug};
+  $days = $opt->{days} if ($opt->{days});
+  $opt->{configure} = 1 if (defined $opt->{configure} and !$opt->{configure});
+  $output_filename = $opt->{output} if ($opt->{output});
+  delete $opt->{quiet} if (defined $opt->{notquiet});
+}
+
+sub check_lock
+{
+    $lock = (flock DATA, &Fcntl::LOCK_EX | &Fcntl::LOCK_NB);
+    &log("Lock failed.\n") unless ($lock);
+}
+
+sub check_other_instance
+{
+    if (!$lock)
+    {
+	&log("\n*** IN PROGRESS ***\nAnother instance of Shepherd is currently running.\n");
+    }
+}
+
+# Here we can specify which command-line options should call
+# subroutines of the same name. The field following each sub
+# name is a string that can contain a key for what action should
+# be performed following the sub:
+#   W : write config file
+#   S : print --status output
+# Shepherd will exit if at least one of these routines was
+# called.
+sub process_setup_commands
+{
+    my %routines = (	enable => 'WS',
+			disable => 'WS',
+			'delete' => 'WS',
+			setorder => 'WS',
+			check => 'WS',
+			setpreftitle => 'W',
+			clearpreftitle => 'W',
+			'reset' => 'W',
+			'component-set' => 'W',
+			addsource => 'W',
+			delsource => 'W',
+			status => '',
+			history => '',
+			desc => '',
+			'show-config' => '',
+			'show-channels' => '',
+			'list-chan-names' => '',
+			'set-icons' => '',
+			'configure-mythtv' => '',
+			'pending' => '',
+			ancestry => '',
+			sources => ''
+		    );
+
+    my ($run, $write_flag, $status_flag);
+    foreach my $func (keys %routines)
+    {
+	if ($opt->{$func})
+	{
+	    $run = 1;
+	    my $sub = $func;
+	    $sub =~ s/-/_/g;
+	    if (!$lock and $routines{$func} =~ /W/)
+	    {
+		print "\nERROR: Cannot --$func while another instance of Shepherd is running.\n".
+		      "Please try again later.\n";
+	    }
+	    else
+	    {
+		&$sub($opt->{$func});
+		$write_flag = 1 if ($routines{$func} =~ /W/);
+		$status_flag = 1 if ($routines{$func} =~ /S/);
+	    }
+	}
+    }
+    return unless ($run);
+    &write_config_file if ($write_flag);
+    &status if ($status_flag);
+    exit;
+}
+
+# if a preferred title source has been specified, add it to our config
+sub setpreftitle
+{
+    my $arg = shift;
+    $pref_title_source = $arg;
+    &log("Added preferred title source: $pref_title_source\n");
+    1;
+}
+
+# if requesting to clear preferred title and we have one, remove it
+sub clearpreftitle
+{
+    &log("Removed preferred title source: $pref_title_source\n");
+    $pref_title_source = undef;
+    1;
+}
+
+sub reset
+{
+    &log(2, "\nWARNING! The --reset argument will remove your established\n" .
+            "title translation data. This may cause Shepherd to lose the\n" .
+	    "ability to keep show titles consistent with what you have seen\n" .
+	    "in the past!\n\n");
+    &countdown(20);
+    my @r = query_component_type('reconciler');
+    foreach (@r)	# Not that there should be more than one...
+    {
+	my $fn = query_ldir($_, 'reconciler') . '/' . $_ . '.storable.config';
+	&log("Removing $fn.\n");
+	unlink($fn) or &log("Failed to remove file! $!\n");
+    }
+
+    if ($pref_title_source)
+    {
+        my @prefs = split(/,/, $pref_title_source);
+        foreach my $grabber (@prefs)
+        {
+            if ($components->{$grabber}->{lastdata})
+            {
+		&log( "Clearing lastdata for '$grabber' to trigger it to be called.\n");
+		delete $components->{$grabber}->{lastdata};
+            }
+        }
+    }
+}
+
+sub delete
+{
+    my $proggy = shift;
+
+    delete $components->{$proggy};
+    &log("\nDeleted component \"$proggy\".");
+}
+
+# used to call a component in a manner so it can set some tunable parameter
+sub component_set
+{
+    my $compset = shift;
+
+    my $helpstr = "Format: --component-set <component>:<argument>[:<argument2>...]\n".
+                  "  e.g.: --component-set oztivo:region=101\n".
+		  "        --component-set oztivo:region=101:debug:config=default.conf\n\n";
+
+    my ($component, @args) = split(/:/,$compset);
+    if (!defined $components->{$component}) {
+	&log("\nError: No component called '$component'!\n$helpstr");
+	return;
+    }
+    my $arg = join(":",@args);
+
+    if ((!defined $arg) || ($arg eq "")) {
+	delete $components->{$component}->{default_cmdline};
+	&log("\n*** Cleared default options for $component. ***\n\n".
+	     "If you wish to set new options:\n$helpstr");
+    } else {
+	$components->{$component}->{default_cmdline} = "--".join(":--",@args);
+	&log("\nSet default options for $component to: --".join(" --",@args)."\n");
+    }
+}
+
+sub sources
+{
+    my $arg = shift;
+
+    if ($arg and $arg eq 'reset')
+    {
+	print "Resetting sources.\n";
+	&reset_sources;
+    }
+    print "Sources:\n".
+          "  # Source                                        Can Update\n".
+	  "-------------------------------------------------------------------\n";
+
+    my $count = 1;
+    foreach my $site (@$sources)
+    {
+	printf " %2d %-50s\n",
+	       $count,
+	       $site;
+	$count++;
+    }
+}
+
+sub addsource
+{
+    my $source = shift;
+
+    my ($site, $priority, @rest) = split(/,/, $source);
+
+    if (@rest)
+    {
+	print "Warning: Ignoring unknown options: @rest\n";
+    }
+
+    $site = "$site/" unless ($site =~ /\/$/);
+
+    &delsource($site, 1);
+
+    if (!$priority or $priority < 1 or $priority > @$sources)
+    {
+	$priority = @$sources;
+    }
+    else
+    {
+	$priority--;
+    }
+    splice (@$sources, $priority, 0, $site);
+    &log("\nAdded source $site\n");
+    if (&fetch_file($site . 'status.csum?', undef, 1))
+    {
+	&log("Source appears valid.\n");
+    }
+    else
+    {
+	&log("\n*** WARNING: Source unreachable! ***\n\n");
+    }
+    &sources;
+    &log("\n*** PLEASE READ CAREFULLY! ***\n".
+	 "Adding a source allows the remote host to install and execute\n".
+	 "software on your system. Each time Shepherd runs (except when\n".
+	 "invoked with --noupdate), it will ask this host for updates.\n".
+	 "This is a serious security risk, and we STRONGLY RECOMMEND that\n".
+	 "you take steps to limit the damage a malicious source could do\n".
+	 "to your system. For more information, see:\n".
+	 "   $wiki/Security\n" .
+	 "To remove a source, use \"--delsource <source>\".\n");
+}
+
+sub delsource 
+{
+    my ($source, $quietcheck) = @_;
+
+    if ($source eq 'all')
+    {
+	print "Resetting sources.\n";
+	&reset_sources;
+	return &sources;
+    }
+    $source = "$source/" unless ($source =~ /\/$/);
+    for (my $i = 0; $i < @$sources; $i++)
+    {
+	my $site = $sources->[$i];
+	if ($source eq $site)
+	{
+	    splice (@$sources, $i, 1);
+	    &reset_sources if (@$sources < 1);
+	    return if ($quietcheck);
+	    print "\nDeleted source: $source\n";
+	    return &sources;
+	}
+    }
+    unless ($quietcheck)
+    {
+	print "\nError: No such source: \"$source\"\n";
+	exit;
+    }
+}
+
+sub reset_sources
+{
+    $sources = [ 'http://www.whuffy.com/shepherd/' ];
+}
+
+sub list_chan_names
+{
+    require Shepherd::Configure;
+    &Shepherd::Configure::list_chan_names;
+}
+
+sub set_icons
+{
+    require Shepherd::Configure;
+    &Shepherd::Configure::set_icons;
+}
+
+sub configure_mythtv
+{
+    require Shepherd::Configure;
+    &Shepherd::Configure::configure_mythtv;
+}
+
+sub ancestry
+{
+    # Since this subroutine is optional and manually invoked, we won't
+    # require users have the File::Find dependency until they need it.
+    # It's probably a little annoying to suddenly realize you need 
+    # another module when you thought everything was installed, but
+    # that's better than requiring all users have this dependency even
+    # if they don't really need it.
+    &require_module("File::Find::Rule");
+
+    # Step 1: figure out start and stop dates
+
+    my $t = time;
+    $opt->{'ancestry-zone'} = POSIX::strftime("%z", localtime($t));
+    print "Assuming local time zone is $opt->{'ancestry-zone'}.\n";
+    my ($start, $stop);
+    if ($opt->{ancestry} =~ /(.*)\+(\d+):?(.*)/)
+    {
+	$opt->{'ancestry-start'} = Date::Manip::UnixDate("$1 $opt->{'ancestry-zone'}","%s");
+	$opt->{'ancestry-stop'} = $opt->{'ancestry-start'} + (60 * $2);
+	$opt->{'ancestry-title'} = $3 if ($3);
+    }
+    unless ($opt->{'ancestry-start'} and $opt->{'ancestry-stop'})
+    {
+	&log("\nSorry, I don't understand the argument sent to --ancestry.\n".
+	     "Format: --ancestry \"<timestamp>+<minutes>[:title]\"\n".
+	     "Timestamp can be any of a variety of formats. Some examples:\n".
+	     "  --ancestry 200706210800+30             (June 21 2007 8am-8:30am)\n".
+	     "  --ancestry \"today 9pm+10\"            (today 9pm-9:10pm)\n".
+	     "  --ancestry \"midnight tomorrow+60\"    (12am-1am tomorrow)\n".
+	     "  --ancestry \"tuesday 8:28pm+10:news\"  (also only shows with \"news\" in title)\n");
+	return;
+    }
+
+    my $dformat = "%A %e %B %Y %I:%M %p %z";
+    printf "Examining ancestry of data from %s to %s.\n",
+	POSIX::strftime($dformat, localtime($opt->{'ancestry-start'})),
+	POSIX::strftime($dformat, localtime($opt->{'ancestry-stop'}));
+    print "Only looking for shows with \"$opt->{'ancestry-title'}\" in title.\n" if ($opt->{'ancestry-title'});
+
+    # Step 2: Figure out dates of interest of output files
+    #
+    # A little tricky because we only store the timestamp of when Shepherd's
+    # last run finished, not when it started.
+
+    print "Last successful run was " . pretty_duration($t - $last_successful_run) ." ago.\n" if ($last_successful_run);
+    my $previous_run = (reverse sort keys %$last_successful_runs)[1] if (ref $last_successful_runs and keys %$last_successful_runs > 1);
+
+    if ($previous_run)
+    {
+	print "Second-last successful run was " . pretty_duration($t - $previous_run)." ago.\n";
+    }
+    else
+    {
+	$previous_run = $t - (24*60*60);
+	print "No data on second-last successful run.\n";
+    }
+    if ($last_successful_run and $last_successful_run - $previous_run > (6*60*60))
+    {
+	$previous_run = $last_successful_run - (6 * 60 * 60);
+	print "Setting cut-off point to 6 hours before end of last successful run.\n";
+    }
+    print "Looking for output files more recent than " . pretty_duration($t - $previous_run) . " ago.\n";
+
+    # Step 3: gather files
+
+    my @f = File::Find::Rule->file()
+                            ->name('output*.xmltv')
+			    ->mtime(">$previous_run")
+			    ->nonempty
+			    ->in('grabbers', 'reconcilers', 'postprocessors');
+    push @f, "output.xmltv" if (-e 'output.xmltv' and (stat 'output.xmltv')[9] > $previous_run);
+
+    # Step 4: Process files via XMLTV callback
+
+    foreach my $f (@f) 
+    { 
+	my $str;
+	if ($f =~ /.*?\/(.*?)\/(.*)/)
+	{
+	    $str = "$1: $2";
+	}
+	else
+	{
+	    $str = "Shepherd Final Output: $f";
+	}
+	print  "********************************************************************************\n";
+	printf "%*s\n", int((80 - length($str)) / 2) + length ($str), $str;
+	XMLTV::parsefiles_callback(undef, undef, undef, \&ancestry_cb, $f);
+    }
+}
+
+sub ancestry_cb
+{
+    my $s = shift;
+
+    my ($start, $stop) = ($s->{start}, $s->{stop});
+    $start .= " $opt->{'ancestry-zone'}" unless ($start =~ /\+\d{4}/);
+    $stop  .= " $opt->{'ancestry-zone'}" unless ($stop =~ /\+\d{4}/);
+
+    $start = Date::Manip::UnixDate($start, "%s");
+    $stop = Date::Manip::UnixDate($stop, "%s");
+    
+    return unless ($stop > $opt->{'ancestry-start'} and $start < $opt->{'ancestry-stop'});
+
+    my $title = (ref $s->{title} ? $s->{title}[0][0] : $s->{title});
+    return if ($opt->{'ancestry-title'} and $title !~ /$opt->{'ancestry-title'}/i);
+    my $channame;
+    foreach (keys %$channels)
+    {
+	if ($channels->{$_} eq $s->{channel})
+	{
+	    $channame = $_;
+	    $channame =~ s/\(.*?\)//g;
+	    last;
+	}
+    }
+    $channame = $s->{channel} unless ($channame);
+    my $subtitle = (ref $s->{'sub-title'} ? $s->{'sub-title'}[0][0] : $s->{'sub-title'});
+    printf "+ %-50s%s\n",
+	"$title [$channame]",
+	POSIX::strftime("%a %d/%m %I:%M%p", localtime($start)) . ' - ' . POSIX::strftime("%I:%M%p", localtime($stop));
+    print "     \"$subtitle\"\n" if ($subtitle);
+    print "     $s->{start}  -  $s->{stop}\n";
+}
+
+# -----------------------------------------
+# Subs: Configuration
+# -----------------------------------------
+
+sub configure
+{
+    eval
+    {
+	require Shepherd::Configure;
+
+	return &Shepherd::Configure::configure;
+    };
+    if ($@)
+    {
+	&log("Error from Shepherd::Configure:\n-> $@\n");
+	return undef;
+    }
+}
+
+# -----------------------------------------
+# Subs: Status & Help
+# -----------------------------------------
+
+sub show_config
+{
+    &log("\nConfiguration\n".
+	 "-------------\n" .
+         "Config file: $config_file\n" .
+	 "Debug mode : " . is_set($debug) . "\n" .
+         "Output file: " . ($opt->{output} ? $opt->{output} : "None") . "\n" .
+         "Region ID  : $region\n");
+    show_channels();
+    &log("\n");
+    status();
+    &log("\n");
+}
+
+sub show_channels
+{
+    my $mchans = &retrieve_mythtv_channels;
+    if ($mchans) {
+	&show_mythtv_mappings($debug, $mchans);
+    } else {
+	&log(sprintf "\nYou have subscribed to %d standard channels and %d HDTV/PayTV channels.\n",
+			scalar(keys %$channels), scalar(keys %$opt_channels));
+	&log("\nShepherd XMLTV IDs:\n");
+	&log(" Standard channels (priority):\n");
+	&log("    $_ -> $channels->{$_}\n") for sort keys %$channels;
+	&log(" HDTV and PayTV channels (best-effort):\n");
+	&log("    $_ -> $opt_channels->{$_}\n") for sort keys %$opt_channels;
+    }
+}
+
+sub is_set
+{
+    my $arg = shift;
+    return $arg ? "Yes" : "No";
+}
+
+sub pretty_print
+{
+    my ($p, $len) = @_;
+    my $spaces = ' ' x (79-$len);
+    my $ret = "";
+
+    while (length($p) > 0) {
+	if (length($p) <= $len) {
+	    $ret .= $p;
+	    $p = "";
+	} else {
+	    # find a space to the left of cutoff
+	    my $len2 = $len;
+	    while ((substr($p,$len2,1) ne ' ') && ($len2 > 0)) {
+		$len2--;
+	    }
+	    if ($len2 == 0) {
+		# no space - just print it with cutoff
+		$ret .= substr($p,0,$len);
+		$p = substr($p,$len,(length($p)-$len));
+	    } else {
+		# print up to space
+		$ret .= substr($p,0,$len2);
+		$p = substr($p,($len2+1),(length($p)-$len2+1));
+	    }
+	    # print whitespace
+	    $ret .= "\n".$spaces;
+	}
+    }
+    return $ret;
+}
+
+sub pretty_date
+{
+    my $t = shift;
+
+    return "-    " unless $t;
+
+    my @lt = localtime($t);
+    my @ltnow = localtime();
+    if (time - $t > 15768000)	# 6 months or older
+    {
+	return POSIX::strftime("%d-%b-%y", @lt);    # eg 18-Mar-05
+    }
+    if (time - $t < 43200	# less than 12 hours ago
+	    or
+	($lt[4] == $ltnow[4] and $lt[3] == $ltnow[3]))	# today
+    {
+	return POSIX::strftime("%l:%M%P ", @lt);    # eg 10:45pm
+    }
+    return POSIX::strftime("%a %d-%b", @lt);	    # eg Mon 25-Dec
+}
+
+sub retrieve_mythtv_channels
+{
+    print "\nAttempting Mysql connection to MythTV database mythconverg.\n";
+
+    my $mchans;
+    eval
+    {
+        require Shepherd::MythTV;
+
+        my $dbh = &Shepherd::MythTV::open_connection();
+        return unless ($dbh); # end eval
+        $mchans = $dbh->selectall_arrayref("SELECT name,callsign,channum,xmltvid FROM channel;", { Slice => {} } );
+        &Shepherd::MythTV::close_connection;
+    };
+    if ($@)
+    {
+        &log("Error trying to access MythTV database: $@\n");
+        return undef;
+    }
+    return $mchans;
+}
+
+sub show_mythtv_mappings
+{
+    my ($show_xmltvids, $mchans) = @_;
+
+    &log(sprintf "\nRegion %d. %d MythTV channels. %d Shepherd channels.\n\n",
+	$region, scalar(@$mchans), scalar(keys %$channels) + scalar(keys %$opt_channels));
+    if ($show_xmltvids)
+    {
+	&log("   #  MythTV Channel                 XMLTV ID             Shepherd Guide Data\n".
+	     " -----------------------------------------------------------------------------\n");
+    }
+    else
+    {
+	&log("   #  MythTV Channel                 Shepherd Guide Data\n".
+             " --------------------------------------------------------\n");
+    }
+    my %xmltvids;
+    map { $xmltvids{$channels->{$_}} = $_ } keys %$channels;
+    map { $xmltvids{$opt_channels->{$_}} = $_ } keys %$opt_channels;
+    my %unmapped = %xmltvids;
+    foreach my $chan (@$mchans)
+    {
+	my $mapped_to = $chan->{'xmltvid'} ? $xmltvids{$chan->{'xmltvid'}} || '-' : '-';
+	delete $unmapped{$chan->{'xmltvid'}} if ($mapped_to ne '-');
+
+	my $longname = $chan->{'name'};
+        $longname .= " ($chan->{callsign})" if ($chan->{'callsign'} and lc($chan->{'callsign'}) ne lc($chan->{'name'}));
+	my $channum = $chan->{'channum'};
+	if ($show_xmltvids)
+	{
+	    &log(sprintf "%4s  %-30s %-20s <- %s\n",
+		         $channum,
+			 $longname,
+			 $chan->{'xmltvid'} || '-',
+			 $mapped_to
+		        );
+	}
+	else
+	{
+	    &log(sprintf "%4s  %-30s <- %s\n",
+		    $channum,
+		    $longname,
+		    $mapped_to);
+	}
+    }
+    if (keys %unmapped)
+    {
+	&log("\nWARNING! Unmapped guide data: " . join(', ', values %unmapped) . ".\n".
+	     "         Shepherd is set to download guide data that no MythTV channel wants.\n".
+	     "         Either map these to a MythTV channel, or do not subscribe to them!\n\n");
+    }
+}
+
+sub desc
+{
+    my $lasttype = '';
+    my %qual_table = ( 3 => "Excellent", 2 => "Good", 1 => "Poor" );
+
+    foreach (sort { $components->{$a}->{type} cmp $components->{$b}->{type} } keys %{$components}) 
+    {
+	if ($lasttype ne $components->{$_}->{type})
+	{
+	    $lasttype = $components->{$_}->{type};
+	    &log("\n*** " . uc($lasttype) . "S ***\n");
+	}
+	&log("\n$_ v$components->{$_}->{ver}" .
+	     "\n* " . pretty_print(query_config($_, 'desc'), 77) . "\n".
+	     "* Component source: " . $components->{$_}->{source} . "\n");
+	if ($lasttype eq 'grabber')
+	{
+	    &log("* Data Quality: " . $qual_table{int(query_config($_, 'quality'))} . "\n");
+	    &log("* Speed: " . (query_config($_, 'category') == 1 ? "Slow" : "Fast") . "\n");
+	    my $ch = query_config($_, 'channels');
+	    $ch = "All" if ($ch eq '');
+	    $ch = "All except $1" if ($ch =~ /^\-(.*)/);
+	    &log("* Channels: $ch\n");
+	    my $d1 = query_config($_, 'max_days');
+	    my $d2 = query_config($_, 'max_reliable_days');
+	    &log("* Days: " . ($d1 == $d2 ? $d1 : "$d2 to $d1") . "\n");
+	}
+    }
+}
+
+sub status
+{
+    foreach my $ctype ('grabber', 'reconciler', 'postprocessor')
+    {
+	&log("\n " . 
+	     ($ctype eq 'grabber' ?
+		"                        Enabled/\n".
+		sprintf(" %-15s Version Ready  Last Run  Status", ucfirst($ctype)) 
+		: ucfirst($ctype)) .
+	     "\n --------------- ------- ----- ---------- -------------------------------------\n");
+	foreach (sort { ($components->{$b}->{lastdata} or 0) <=> ($components->{$a}->{lastdata} or 0) } query_component_type($ctype))
+	{
+	    my $h = $components->{$_};
+	    &log(sprintf  " %-16s%7s %1s/%1s%1s %11s %s\n",
+		 length($_) > 16 ? substr($_,0,14).".." : $_,
+		 $h->{ver},
+		 $h->{disabled} ? 'N' : 'Y',
+		 $h->{ready} ? 'Y' : 'N',
+		 (defined $plugin_data->{$_}->{tainted} ? "!" : ""),
+		 pretty_date($h->{lastdata}),
+		 ((defined $h->{disabled} && $h->{disabled} == 2) ? "centrally disabled" :
+		     ($h->{laststatus} ? pretty_print($h->{laststatus},37) : '')));
+	}
+    }
+    if (defined $last_successful_run)
+    {
+	my $str = sprintf "Shepherd last ran successfully %s ago", 
+		          pretty_duration(time - $last_successful_run);
+	if (defined $last_successful_run_data)
+	{
+	    $str .= sprintf " and acquired %2.2f%% of data",
+	                    $last_successful_run_data;
+	}
+	&log("\n$str.\n");
+    }
+    &log("\nPreferred titles from grabber '$pref_title_source'\n") if ($pref_title_source);
+    &log("\nWARNING: [!] against components above indicate TAINTED components.\n\n")
+      if (defined $plugin_data->{tainted});
+    &check_other_instance;
+}
+
+sub history
+{
+    my @all_runs = (sort {$a <=> $b} keys %{$last_successful_runs});
+    if (scalar @all_runs == 0) {
+	&log("\nNo runs recorded yet.\n\n");
+	return;
+    }
+
+    &log(sprintf "\nShepherd has run successfully %d times in the last %d days.\n\n",
+		 scalar(keys %$last_successful_runs),
+		 int((time - $all_runs[0]) / 86400));
+    my $str;
+    foreach my $when (sort {$b <=> $a} keys (%{$last_successful_runs})) 
+    {
+	$str = ($str ? "$str," : 'History:');
+	my $append = sprintf " %s ago (%2.2f%%)", 
+		     &pretty_duration(time - $when),
+		     $last_successful_runs->{$when};
+	if (length($str.$append) > 79) 
+	{
+	    &log("$str\n");
+	    $str = '        ';
+	}
+	$str .= $append;
+    }
+    &log("$str.\n");
+    &check_other_instance;
+}
+
+sub capabilities
+{
+    print "baseline\nmanualconfig\npreferredmethod\n";
+    exit 0;
+}
+
+sub preferredmethod
+{
+    print "allatonce\n";
+    exit 0;
+}
+
+sub description
+{
+    print "Australia\n";
+    exit 0;
+}
+
+sub help
+{
+    print q{Info options:
+    --help                Display this message
+    --dev-help            Display advanced options
+    --version             Display version
+    --status              Display status of various components
+    --desc                Display detailed status of components
+    --history             Display usage history
+    --check               Display check of all components
+
+    --show-config         Show setup details
+    --show-channels       Show subscribed channels
+    --pending             Show any pending component installs
+    --ancestry <s>        Show origin of recent guide data
+                          (for format, see "--ancestry help")
+
+Session options:
+    --output <s>          Create output file <s> (default: output.xmltv)
+    --days <n>            Retrieve <n> days of guide data
+    --offset <n>          Skip first <n> days
+
+    --reoutput            Don't grab fresh data; just return cache
+    --noupdate            Don't update Shepherd; just grab data
+    --update              Don't grab data; just update Shepherd
+    --skipupdate          Skip update of Shepherd
+    --skippost            Skip postprocessing of data
+
+    --mode <s>            Quality (default), Efficiency or Speed
+    --grabwith <s>        Grab with grabber <s> before trying other grabbers
+                          (e.g. --grabwith sbsweb,abc_website)
+
+    --debug               Print debugging messages
+    --quiet               Don't print anything except errors
+    --notquiet            Don't be --quiet
+    --nolog               Don't write a logfile
+    --nonotify            Don't report anonymous usage statistics
+
+Configuration options:
+    --configure           Setup
+    --configure-mythtv    Create symlink & cron job for MythTV
+
+    --disable <s>         Set component <s> (or "all") as not to be used
+    --enable <s>          Set component <s> (or "all") as available for use
+
+    --component-set <s:s> Set default argument for component
+    --configure <s>       Configure component <s>
+
+    --set-icons           Download channel icons and update MythTV to use them
+    --setpreftitle <s>    Set preferred 'title' source as grabber <s>
+    --clearpreftitle      Clear preferred 'title' source
+    --reset               Remove all previous title translation data
+};
+    exit 0;
+}
+
+sub dev_help
+{
+    print q{Developer options:
+
+    These options are probably never useful to regular users.
+
+    --dontcallgrabbers    Don't call the grabbers, just process cached data
+    --list-chan-names     List official channel names
+    --delete <s>          Delete a Shepherd component
+    --randomize           Use weighted random method of grabber selection
+
+    --sources             List Shepherd sources
+    --addsource <s>[,p]   Add a Shepherd source (optional: priority #)
+    --delsource <s>       Delete a Shepherd source (or 'all')
+   };
+    exit 0;
+}
+
+
+# -----------------------------------------
+# Subs: override handlers for standard perl.
+# -----------------------------------------
+
+# ugly hack. please don't try this at home kids!
+sub my_die {
+    my ($arg,@rest) = @_;
+    my ($pack,$file,$line,$sub) = caller(0);
+
+    # check if we are in an eval()
+    if ($^S) {
+	printf STDERR "* Caught a die() within eval{} from file $file line $line\n";
+    } else {
+	    printf STDERR "\nDIE: line %d in file %s\n",$line,$file;
+	    if ($arg) {
+		CORE::die($arg,@rest);
+	    } else {
+		CORE::die(join("",@rest));
+	    }
+    }
+}
+
+
+# -----------------------------------------
+# Subs: Grabbing
+# -----------------------------------------
+
+sub grab_data
+{
+    my $grab_policy = shift;
+    $grab_policy = "standard" if (!defined $grab_policy);
+
+    $find_microgaps = 0;
+    $missing_unfillable = undef;
+
+    my $used_grabbers = 0;
+    &log("\nSHEPHERD: Grabber stage ($grab_policy).\n");
+    &log("SHEPHERD: Seeking supplementary data for episode names ('sub-titles').\n") if ($grab_policy eq 'expanded');
+    &log("SHEPHERD: " .
+	 (($opt->{mode} and grep($_ eq lc($opt->{mode}), qw(efficiency speed))) ?
+	     ucfirst(lc($opt->{mode})) : 'Quality') . 
+	     " mode.\n");
+
+    &analyze_plugin_data("",1,$progname);    
+
+    my ($grabber, $reason_chosen);
+    while (my ($grabber, $reason_chosen) = choose_grabber($grab_policy))
+    {
+	last if (!defined $grabber);
+
+	$data_satisfies_policy = 0;
+	$data_found_all = 0;
+	$used_grabbers++;
+
+	&log("\nSHEPHERD: Using grabber: ($used_grabbers) $grabber ($reason_chosen)\n");
+
+	my $iteration = query_iteration($grabber);
+
+	my $output = sprintf "%s/grabbers/%s/output-%d.xmltv", 
+			     $CWD, $grabber, $iteration;
+
+	my $comm = "$CWD/grabbers/$grabber/$grabber " .
+	           "--region $region " .
+	           "--output $output";
+
+	if (query_config($grabber, 'option_grabber_settings')) {
+		$comm .= " " . query_config($grabber, 'option_grabber_settings');
+	}
+
+	# Category 1 grabbers (i.e. slow ones) are requested to only fetch the timeslice
+	# that we need. Category 2 grabbers are requested to get everything, since there's
+	# very little cost in grabbing that extra data, and we can use it in the reconciler
+	# to verify that everything looks OK.
+	if (query_config($grabber, 'category') == 1)
+	{
+	    &log("SHEPHERD: Asking $grabber for " . 
+		 ($find_microgaps ? 'microgaps within ' : '') .
+		 display_best_timeslice());
+
+	    if ($timeslice->{start} != 0)
+	    {
+		$comm .= " " . 
+			 query_config($grabber, 'option_days_offset') .
+			 " " .
+			 $timeslice->{start};
+	    }
+
+	    my $n = $timeslice->{stop} + 1;
+	    if ($timeslice->{start} != 0 
+		    and 
+		!query_config($grabber, 'option_offset_eats_days'))
+	    {
+		$n -= $timeslice->{start};
+	    }
+	    $comm .= " " .
+		     query_config($grabber, 'option_days') .
+		     " " . 
+		     $n;
+	    
+	    # Write a temporary channels file specifying only the channels we want
+	    my $tmpchans;
+	    foreach (@{$timeslice->{chans}})
+	    {
+		$tmpchans->{$_} = $channels->{$_};
+	    }
+	    my $tmpcf = "$CWD/channels.conf.tmp";
+	    write_file($tmpcf, 'temporary channels', [ $tmpchans ], [ 'channels' ]);
+	    $comm .= " --channels_file $tmpcf";
+
+	    # Create gaps_file if we want less than (roughly) the full day
+	    if ($find_microgaps)
+	    {
+		my $tmpgf = "$CWD/gaps.tmp";
+		my $gapstr = record_requested_gaps($tmpgf, $timeslice, $grabber);
+		$comm .= " --gaps_file $tmpgf";
+		&log(1, "SHEPHERD: Asking $grabber to fill gaps: $gapstr\n");
+	    }
+	}
+	else
+	{
+	    &log("SHEPHERD: Asking $grabber for days " . 
+		 ($opt->{offset} ? $opt->{offset} : 0) . 
+		 " - " . ($days-1). " of all channels\n");
+	    $comm .= " --days $days" if ($days);
+	    $comm .= " --offset $opt->{offset}" if ($opt->{offset});
+	    $comm .= " --channels_file $channels_file";
+	}
+
+	&record_requested_chandays($grabber, $timeslice);
+
+	if ((defined $plugin_data->{tor_pid}) &&
+	    (query_config($grabber, 'option_anon_socks'))) {
+	    $comm .= " ".query_config($grabber, 'option_anon_socks')." ".$plugin_data->{tor_address};
+	}
+
+	$comm .= " --debug" if ($debug);
+	$comm .= " @ARGV" if (@ARGV);
+
+	my $retval = 0;
+	my $msg;
+	my $component_start = time;
+	if ((defined $opt->{dontcallgrabbers}) && ($opt->{dontcallgrabbers})) {
+	    &log("SHEPHERD: not calling grabber because of --dontcallgrabbers option, but will instead use existing $output\n");
+	    &log(1, "SHEPHERD: would have called: $comm\n");
+ 	} else {
+	    &log("SHEPHERD: Executing command: $comm\n");
+	    if (-e $output) {
+		&log(1, "SHEPHERD: Removing old output file: $output\n");
+		unlink($output) or &log("SHEPHERD: Failed to remove old output file: $output\n$!\n");
+	    }
+	    ($retval,$msg) = call_prog($grabber,$comm,0,(query_config($grabber,'max_runtime')*60));
+	}
+	my $component_duration = time - $component_start;
+
+	if ($retval) {
+	    &log("Grabber exited with non-zero code $retval: assuming it failed.\n" .
+	         "Last message: \"$msg\"\n");
+	    $components->{$grabber}->{laststatus} = "Failed (code $retval)";
+	    $components->{$grabber}->{consecutive_failures}++;
+	    &add_pending_message($grabber,"FAIL", $retval.":".$msg, $component_start, $component_duration, 
+		$components->{$grabber}->{ver}, $components->{$grabber}->{consecutive_failures});
+	    next;
+	}
+
+	# soak up the data we just collected
+	&soak_up_data($grabber, $output, "grabber", $grab_policy);
+	$components->{$grabber}->{laststatus} = $plugin_data->{"$grabber-$iteration"}->{laststatus};
+
+	# analyze the data that this grabber returned
+	# (useful to detect individual components going bad and report them upstream)
+	&analyze_plugin_data("grabber $grabber", 1, $grabber, $iteration);
+
+	if ($plugin_data->{"$grabber-$iteration"}->{valid}) {
+	    $components->{$grabber}->{lastdata} = time;
+	    delete $components->{$grabber}->{consecutive_failures}
+	      if (defined $components->{$grabber}->{consecutive_failures});
+	    &add_pending_message($grabber,"SUCCESS", $retval, $component_start, $component_duration, 
+		$components->{$grabber}->{ver}, ($plugin_data->{"$grabber-$iteration"}->{total_duration}/60) );
+	} else {
+	    $components->{$grabber}->{laststatus} = sprintf "Failed (%s)", $plugin_data->{"$grabber-$iteration"}->{failure_reason};
+	    $components->{$grabber}->{consecutive_failures}++;
+	    &add_pending_message($grabber,"FAIL", '0:'.$plugin_data->{"$grabber-$iteration"}->{failure_reason},
+		$component_start, $component_duration, $components->{$grabber}->{ver}, 
+		$components->{$grabber}->{consecutive_failures});
+	    # Don't report MISSING_DATA if the component failed
+	    delete $pending_messages->{"$grabber-$iteration"}->{MISSING_DATA};
+	}
+
+	# check to see if we have all the data we want
+	$data_satisfies_policy = &analyze_plugin_data("analysis of all grabbers so far",0,$progname);
+
+	my $missing_before = convert_dayhash_to_list($missing);
+	my $missing_after = convert_dayhash_to_list(detect_missing_data($grab_policy, 1));
+	my $list = List::Compare->new($missing_before, $missing_after);
+	my @grabbed = $list->get_symmetric_difference();
+	&log("SHEPHERD: Filled " . scalar(@grabbed) . " channel-days with new data from $grabber.\n");
+	&log(1, "SHEPHERD: Channel-days acquired: " . join (', ', @grabbed) . ".\n");
+
+	# Record what we grabbed from cacheable C1 grabbers
+	if (query_config($grabber, 'category') == 1 and query_config($grabber, 'cache'))
+	{
+	    record_cached($grabber, @grabbed);
+	    write_config_file();
+	}
+
+	# Force paytv to exit because analysis is only for freetv (could maybe move this higher)
+	if ($grab_policy eq "paytv") {
+		$data_satisfies_policy = 1;
+		$data_found_all = 1;
+		last;
+	}
+
+	last if ($data_found_all);
+	if ($data_satisfies_policy and $grab_policy ne 'expanded')
+	{
+	    $find_microgaps = 1;
+	}
+    }
+
+    if ($used_grabbers == 0)
+    {
+	&log("SHEPHERD: No valid grabbers available for $grab_policy stage.\n");
+    }
+    elsif (!$data_satisfies_policy)
+    {
+	&log("SHEPHERD: Ran through all grabbers but still have policy-violating gaps in data. :(\n");
+    }
+    elsif (!$data_found_all)
+    {
+	&log("SHEPHERD: Unfillable micro-gaps exist in data.\n");
+    }
+}
+
+sub query_iteration
+{
+    my $grabber = shift;
+
+    my $i = 0;
+    while (1)
+    {
+	return $i unless (defined $plugin_data->{"$grabber-$i"});
+	$i++;
+	die "Insane infinite loop suspected!" if ($i > 15);
+    }
+}
+
+# -----------------------------------------
+# Subs: Intelli-random grabber selection
+# -----------------------------------------
+
+sub choose_grabber
+{
+    my $grabber_policy = shift;
+
+    $missing = detect_missing_data($grabber_policy) if ($grabber_policy ne "paytv");
+    my $total;
+
+    do { # while (!$total);
+
+	if (defined $gscore)	# Reset score hash
+	{
+	    foreach (keys %$gscore)
+	    {
+		$gscore->{$_} = 0;
+	    }
+	}
+	else			# Create score hash
+	{
+	    foreach (query_grabbers())
+	    {
+		unless (($components->{$_}->{disabled}) || (defined $plugin_data->{$_}->{failed_test}))
+	        {
+		    $gscore->{$_} = 0;
+		    if (query_config($_, 'category') == 1 and query_config($_, 'cache'))
+		    {
+			$gscore->{$_ . ' [cache]'} = 0;
+		    }
+		}
+	    }
+	}
+
+	if ($grabber_policy ne "paytv") {
+	    # no point calling these on paytv channels - paytv channels are always $opt_channels ..
+
+	    remove_missing_unfillable();
+	    $timeslice = find_best_timeslice();
+
+	    if ($timeslice->{chandays} == 0 && !$find_microgaps and $grabber_policy eq 'standard') {
+		&log("SHEPHERD: No fillable timeslices, trying microgaps!\n\n");
+		$find_microgaps = 1;
+		$missing = detect_missing_data($grabber_policy);
+		remove_missing_unfillable();
+		$timeslice = find_best_timeslice();
+	    }
+
+	    if ($timeslice->{chandays} == 0) {
+		&log("SHEPHERD: No fillable timeslices!\n");
+		return undef;
+	    }
+
+	    &log("SHEPHERD: Best timeslice: " . display_best_timeslice());
+	} else {
+	    # if we are grabbing paytv, remove grabbers that can't provide paytv data
+	    foreach my $grabber (keys %$gscore) {
+		# Only want grabbers of type 'paytv' or 'both' (undef == FTA)
+		if (!query_config($grabber, 'type')) {
+		    delete $gscore->{$grabber};
+		} else {
+		    # can this grabber provide any channels we are interested in?
+		    my $channels_supported = query_config($grabber, 'channels');
+		    unless (defined $channels_supported)
+		    {
+			&log("WARNING: Grabber $grabber has no channel support " .
+			"specified in config.\n");
+			$channels_supported = '';
+		    }
+
+		    my $matching_channels = 0;
+		    if ($channels_supported) {
+			if (($channels_supported =~/^-/)) {
+			    # find a non-matching channel
+			    foreach my $ch (keys %$opt_channels) {
+				if ($channels_supported !~ /\b$ch\b/) {
+				    $matching_channels = 1;
+				    last;
+			        }
+			    }
+			} else {
+			    # find a matching channel
+			    foreach my $ch (keys %$opt_channels) {
+				if ($channels_supported =~ /\b$ch\b/) {
+				    $matching_channels = 1;
+				    last;
+			        }
+			    }
+			}
+		    } else {
+			# Empty string means we support all
+			$matching_channels = 1;
+		    }
+		    delete $gscore->{$grabber} if ($matching_channels == 0);
+		}
+	    }
+	}
+
+	$total = score_grabbers($grabber_policy);
+ 
+	&log("SHEPHERD: Scoring grabbers on ability to efficiently provide needed data:\n");
+	&log("SHEPHERD: Only considering micro-grabbers.\n") if ($find_microgaps);
+	foreach (sort { $gscore->{$b} <=> $gscore->{$a} } keys %$gscore)
+	{
+	    next if ($_ =~ /\[cache\]/);
+
+	    my $score  = $gscore->{$_};
+	    my $cscore = $gscore->{"$_ [cache]"};
+	    my $cstr   = $cscore ? "(inc. $cscore cache pts) " : "";
+	    $cstr .= "(already called)" if (($score == 0) && ($grabber_policy eq "paytv"));
+
+	    if ($opt->{randomize})
+	    {
+		&log(sprintf "%22s %6.1f%% %9s %s\n",
+			    $_, 
+			    ($total ? 100* $score / $total : 0), 
+			    "$score pts",
+			    $cstr);
+	    }
+	    else
+	    {
+		&log(sprintf "%22s %4s pts %s\n",
+			    $_, 
+			    $score,
+			    $cstr);
+	    }
+	}
+
+	if ($opt->{grabwith})
+	{
+	    my @a = split(/,/, $opt->{grabwith});
+	    my $g;
+	    while ($g = shift @a)
+	    {
+		$opt->{grabwith} = (@a ? join(',', @a) : undef);
+
+		if ($components->{$g}->{disabled})
+		{
+		    &log("\nSkipping --grabwith grabber \"$g\": it is disabled.\n");
+		    next;
+		}
+
+		&log("\nObeying --grabwith option: selecting grabber \"$g\".\n");
+		if ($components->{$g} and $components->{$g}->{type} eq 'grabber')
+		{
+		    return(select_grabber($g, $gscore), "--grabwith policy");
+		}
+		&log("Not a grabber: \"$g\".\n");
+	    }
+	}
+
+	return undef if $grabber_policy eq "paytv" && !$total;
+
+	if (!$total) { # $grabber_policy ne "paytv"
+	    &log("SHEPHERD: Unfillable timeslice.\n\n");
+	    add_timeslice_to_missing_unfillable();
+	}
+
+    } while (!$total); # $grabber_policy ne "paytv"
+
+    # If the user has specified a pref_title_source -- i.e. he is
+    # transitioning from a known grabber -- then we make sure it
+    # has run at least once, to build the list of title translations.
+    if ($pref_title_source)
+    {
+	my @prefs = split(/,/, $pref_title_source);
+	foreach my $grabber (@prefs)
+	{
+	    unless ($components->{$grabber}->{lastdata})
+	    {
+		&log("Need to build title translation list for transitional grabber $grabber.\n");
+		return(select_grabber($grabber, $gscore), "transitional for title translation") if ($gscore->{$grabber});
+		&log("WARNING: Can't run $grabber to build title translation list!\n");
+	    }
+	}
+    }
+
+    # If run with --randomize, then rather than always selecting the highest-scoring
+    # grabber first we'll make a weighted random selection.
+    if ($opt->{randomize})
+    {
+	my $r = int(rand($total));
+	my $c = 0;
+	foreach my $grabber (keys %$gscore)
+	{
+	    next if (!$gscore->{$grabber} or $grabber =~ /\[cache\]/);
+	    if ($r >= $c and $r < ($c + $gscore->{$grabber}))
+	    {
+		return(select_grabber($grabber, $gscore), "--randomize weighted policy");
+	    }
+	    $c += $gscore->{$grabber};
+	}
+	die "ERROR: failed to choose grabber.";
+    }
+
+    # Choose grabber with best score. If there are multiple grabbers with the
+    # best score, randomly select one of them.
+    my @sorted = sort { $gscore->{$b} <=> $gscore->{$a} } keys %$gscore;
+    my @candidates = ( $sorted[0] );
+    my $c = 1;
+    while ($c < @sorted and $gscore->{$sorted[$c]} == $gscore->{$sorted[0]})
+    {
+	push @candidates, $sorted[$c] unless ($sorted[$c] =~ /\[cache\]/);
+	$c++;
+    }
+
+    my $num_choices = grep (($gscore->{$_} and $_ !~ /\[cache\]/), @sorted);
+    if (@candidates > 1)
+    {
+	&log("Multiple grabbers with best score: @candidates.\n");
+	return(select_grabber($candidates[int(rand(scalar(@candidates)))], $gscore),
+		        "equal best of $num_choices options, randomly selected from " .
+			(scalar(@candidates)-1) .
+			" peer" . 
+			(@candidates > 2 ? 's' : ''));
+    }
+    return(select_grabber($candidates[0], $gscore),
+	    $num_choices == 1 ? "only option" : "best of $num_choices options");
+}
+
+sub select_grabber
+{
+    my ($grabber, $gscore) = @_;
+
+    &log(1, "Selected $grabber.\n");
+    if (query_config($grabber, 'category') == 2)
+    {
+	# We might want to run C1 grabbers multiple times
+	# to grab various timeslices, but not C2 grabbers,
+	# which should get everything at once.
+	delete $gscore->{$grabber};
+    }
+    return $grabber;
+}
+
+# Grabbers earn 1 point for each slot or chanday they can fill.
+# This score is multiplied if the grabber:
+# * is a category 2 grabber (i.e. fast/cheap)
+# * is a category 1 grabber that has the data we want in a cache
+# * can supply high-quality data
+# Very low quality grabbers score 0 unless we need them; i.e. they're backups.
+sub score_grabbers
+{
+    my $grabber_policy = shift;
+    my ($total, $key);
+
+    my $bestdq = 0;
+
+    # Compare C2 grabbers against the raw missing file, because we'll get
+    # everything. But compare C1 grabbers against the timeslice, because we'll
+    # only ask them for a slice. This goes for the [cache] and regular C1s.
+    foreach my $grabber (keys %$gscore)
+    {
+	# for each slot, say whether we can fill it or not -- that is,
+	# whether we support this channel and this day #.
+
+	my $hits = 0;
+	my $cat = query_config($grabber, 'category');
+	my $dq = query_config($grabber, 'quality');
+
+	if ($cat == 1)
+	{
+	    $key = cut_down_missing($grabber);
+	    # &log(1, "Grabber $grabber is Category 1: comparing capability to best timeslice.\n");
+	}
+	else
+	{
+	    $key = $missing;
+	    # &log(1, "Grabber $grabber is Category 2: comparing capability to all wanted channels and days.\n");
+	}
+
+	if ($grabber_policy eq 'expanded' and ($cat != 2 or !&query_config($grabber, 'has_subtitles')))
+	{
+	    $hits = 0;
+	}
+	elsif (!supports_region($grabber))
+	{
+#	    &log(1, "Zeroing $grabber due to no region support\n");
+	    $hits = 0;
+	}
+	elsif (($find_microgaps) and (!query_config($grabber, 'micrograbs')))
+	{
+#	    &log(1, "Zeroing $grabber due to non-micrograbbing\n");
+	    $hits = 0;
+	}
+	elsif ($grabber =~ /\[cache\]/)
+	{
+	    $hits = find_cache_hits($grabber, $key);
+	}
+	elsif ($grabber_policy eq "paytv")
+	{
+		foreach my $day (($opt->{offset} ? $opt->{offset} : 0) .. $days-1)
+		{
+			my $val = supports_day($grabber, $day);
+			next unless ($val);
+			foreach my $ch (keys %$opt_channels)
+			{
+				$hits += $val * &supports_channel($grabber, $ch, $day);
+			}
+			$hits = 1 if ($hits > 0 and $hits < 1);
+		}
+	}
+	else
+	{
+		foreach my $day (sort keys %$key)
+		{
+			my $val = supports_day($grabber, $day);
+			next unless ($val);
+			# &log(1, "Day $day:");
+			foreach my $ch (@{$key->{$day}})
+			{
+				$hits += $val * &supports_channel($grabber, $ch, $day)
+			}
+			$hits = 1 if ($hits > 0 and $hits < 1);
+		}
+	}
+
+	$dq -= 0.8 if (!&query_config($grabber, 'has_subtitles'));
+
+	my $catbonus = 1;
+	$catbonus = 3 if ($cat == 2);
+	if ($grabber =~ /\[cache\]/)
+	{
+	    # Bonus is on a sliding scale between 1 and 2 depending on 
+	    # % of required data in cache
+	    $catbonus += $hits / $timeslice->{chandays};
+	}
+
+	my $mult;
+	if ($opt->{mode} and lc($opt->{mode}) eq 'efficiency')
+	{
+	    $mult = $dq ** $catbonus;
+	}
+	elsif ($opt->{mode} and lc($opt->{mode} eq 'speed'))
+	{
+	    $mult = ($catbonus ** $catbonus) * $dq / 2;
+	}
+	else	# Quality mode
+	{
+	    $mult = ($dq ** $dq) * $catbonus / 2;
+	}
+
+	$mult *= 0.9 if (query_config($grabber, 'has_noncritical_gaps'));
+
+	my $score = int($hits * $mult);
+
+	my $str = sprintf "Grabber %s can supply %d chandays",
+			  $grabber, $hits;
+	$str .= sprintf(" at x%.1f (cat: %d, DQ: %d): %d pts",
+			    $mult,
+			    $cat,
+			    $dq,
+			    $score) if ($hits);
+#	&log(1, "$str.\n");
+
+	if ($score and query_config($grabber, 'option_anon_socks') and !defined $plugin_data->{tor_pid}) 
+	{
+#	    &log(1, "Grabber $grabber needs Tor to run efficiently: reducing score.\n");
+	    $score = int($score/10)+1;
+	}
+
+	$gscore->{$grabber} += $score;
+	$total += $score;
+	if ($grabber =~ /\[cache\]/)
+	{
+	    $gscore->{query_name($grabber)} += $score;
+	}
+
+	if ($score and $dq > $bestdq)
+	{
+	    $bestdq = $dq;
+	}
+    }
+    
+    # Eliminate grabbers of data quality 1 if there are any better-quality
+    # alternatives. (Only need to do this with 'randomize' option, since otherwise
+    # we will always pick the highest score.)
+    if ($opt->{randomize})
+    {
+	foreach (keys %$gscore)
+	{
+	    if (query_config($_, 'quality') == 1 and $bestdq > 1)
+	    {
+		$total -= $gscore->{$_};
+		$gscore->{$_} = 0;
+#		&log(1, "Zeroing grabber $_ due to low data quality.\n");
+	    }
+	}
+    }
+
+    return $total;
+}
+
+# Return 1 if the grabber can provide data for this channel, 
+# 0.5 if it supports it unreliably, and 0 if it doesn't support
+# it at all May optionally be sent 'day' arg, which allows
+# specific checking to see if the channel is supported for that
+# day number.
+#
+# Note that Shepherd considers today to be Day 0, so a grabber
+# that says it can grab 7 days of data supports Day 0 to Day 6.
+sub supports_channel
+{
+    my ($grabber, $ch, $day) = @_;
+
+    my $val = 1;
+
+    # If grabber has 'max_reliable_days_per_channel' specified, and
+    # we're looking at a channel and day that's outside that, we'll
+    # never return more than a value of 0.5.
+    my $mdpc = query_config($grabber, 'max_reliable_days_per_chan');
+    $val = 0.5 if ($mdpc and defined $day and $mdpc->{$ch} and $day >= $mdpc->{$ch});
+
+    # If grabber has a 'max_days_per_chan' specified that includes
+    # the channel we're looking at, return 0 if we're outside it and
+    # 1 if we're within it (or 0.5 if modified by the previous check).
+    $mdpc = query_config($grabber, 'max_days_per_chan');
+    return ($day >= $mdpc->{$ch} ? 0 : $val) if ($mdpc and defined $day and $mdpc->{$ch});
+
+    $ch =~ s/ /_/g;
+
+    # Does this grabber have any channel support exceptions? If so,
+    # see if the wanted channel is listed for our region.
+    my $exceptions = query_config($grabber, 'channel_support_exceptions');
+    if ($exceptions and $exceptions =~ /\b$region:(-?)\S*\b$ch\b/)
+    {
+	return ($1 ne '-' ? $val : 0);
+    }
+
+    # No special regional exemptions, so check the main support string.
+
+    my $channels_supported = query_config($grabber, 'channels');
+    unless (defined $channels_supported)
+    {
+	&log("WARNING: Grabber $grabber has no channel support " .
+	     "specified in config.\n");
+	$channels_supported = '';
+    }
+
+    return $val unless ($channels_supported); # Empty string means we support all
+    
+    my $match = ($channels_supported =~ /\b$ch\b/);
+    $exceptions = ($channels_supported =~/^-/);
+    return ($match != $exceptions ? $val : 0);
+}
+
+# Returns 1 if the grabber supports our set region, else 0
+sub supports_region
+{
+    my ($grabber) = @_;
+
+    my $rsupport = query_config($grabber, 'regions');
+    return 1 unless ($rsupport);    # Empty string means full support
+
+    my $match = ($rsupport =~ /\b$region\b/);
+    my $exceptions = ($rsupport =~/^-/);
+    return ($match != $exceptions);
+}
+
+# Return 0 if the grabber can't provide data for this day,
+# 1 if it can reliably, and 0.5 if it can unreliably.
+#
+# Note that a max_days of 7 means the grabber can retrieve data for
+# today plus 6 days.
+sub supports_day
+{
+    my ($grabber, $day) = @_;
+
+    return 0 unless ($day < query_config($grabber, 'max_days'));
+    return 0.5 if ($day >= query_config($grabber, 'max_reliable_days'));
+    return 1;
+}
+
+sub find_cache_hits
+{
+    my ($grabber, $key) = @_;
+
+    $grabber = query_name($grabber);
+
+    return 0 unless ($components->{$grabber}->{cached});
+
+    my $hits = 0;
+
+    foreach my $day (keys %$key)
+    {
+	next unless (supports_day($grabber, $day));
+	my $date = substr(DateCalc("today", "+ $day days"), 0, 8);
+	foreach my $ch (@{$key->{$day}})
+	{
+	    next unless (supports_channel($grabber, $ch, $day));
+	    $hits++ if (grep(/^$date:$ch$/, @{$components->{$grabber}->{cached}}));
+	}
+    }
+    return $hits;
+}
+
+# Build a dayhash of what channel/day data we're currently missing.
+# Only policy-violating holes count unless $find_microgaps is set.
+sub detect_missing_data
+{
+    my ($grabber_policy, $quiet) = @_;
+
+    my $m = { };
+
+    &log("SHEPHERD: Hunting for microgaps!\n") if ($find_microgaps and !$quiet);
+    foreach my $ch (keys %$channels)
+    {
+	# is this channel missing too much data?
+	if ($find_microgaps)
+	{
+	    my $lastday = -1;
+	    foreach my $line (@{$channel_data->{$ch}->{analysis}->{missing_all}})
+	    {
+		$line =~ /^#(\d)/ or die "Bad line $line";
+		my $day = $1;
+		unless ($day == $lastday)
+		{
+		    push (@{($m->{$day})}, $ch);
+		    $lastday = $day;
+		}
+	    }
+	}
+	elsif ($grabber_policy eq 'expanded')
+	{
+	    # Search our guide data for any channel-days that were filled
+	    # by grabbers that don't support sub-titles.
+
+	    foreach my $day (@{($channel_data->{$ch}->{analysis}->{day})})
+	    {
+		next unless ($day and keys %$day);
+
+		my $str;
+
+		foreach my $plugin (keys %$plugin_data)
+		{
+		    next unless ($plugin =~ /^(.*)-\d+$/);
+		    my $pluginname = $1;
+
+		    next unless ($components->{$pluginname} and $components->{$pluginname}->{type} eq 'grabber');
+
+		    if ($plugin_data->{$plugin}->{analysis}->{$ch}->{day}->[$day->{num}]->{have})
+		    {
+			# This grabber has supplied some data for this channel-day 
+    
+			if (&query_config($pluginname, 'has_subtitles'))
+			{
+			    # The grabber supports subtitles
+	
+			    if (!$plugin_data->{$plugin}->{analysis}->{$ch}->{day}->[$day->{num}]->{missing})
+			    {
+				# A subtitle-supporting grabber supplied this channel-day;
+				# no need for further data.
+
+				$m->{$day->{num}} = [ grep($_ ne $ch, @{$m->{$day->{num}}}) ];
+				delete $m->{$day->{num}} unless (@{$m->{$day->{num}}});
+				undef $str;
+				last;
+			    }
+
+			    # Otherwise this grabber didn't fill the whole day, so
+			    # we still should seek data
+			}
+			else
+			{
+			    # The grabber that supplied data doesn't support sub-titles;
+			    # add this channel-day to our list of holes.
+
+			    $str = "May lack episode names: $ch day $day->{num} (filled by $pluginname)\n";
+			    push(@{($m->{($day->{num})})}, $ch);
+			}
+		    }
+		}
+		&log(1, "SHEPHERD: $str") if ($str);    # If we get this far, it's a 'suspect' channel-day
+	    }
+	}
+	elsif (!$channel_data->{$ch}->{analysis}->{data_ok}) 
+	{
+	    foreach my $day (@{($channel_data->{$ch}->{analysis}->{day})}) 
+	    {
+		next unless ($day and keys %$day); 
+		push(@{($m->{($day->{num})})}, $ch) unless ($day->{day_ok});
+	    }
+	}
+    }
+
+    my @chans;
+    foreach my $day (keys %$m)
+    {
+	$m->{$day} = [ sort @{$m->{$day}} ];
+	foreach my $ch (@{$m->{$day}})
+	{
+	    push (@chans, $ch) unless (grep ($_ eq $ch, @chans));
+	}
+    }
+
+    &log(sprintf "SHEPHERD: Need %d channel-days of data (%d channels across %d days).\n",
+                 scalar(keys %$m) * @chans,
+		 scalar(@chans),
+		 scalar(keys %$m)
+	     ) if (keys %$m and !$quiet);
+    return $m;
+}
+
+# Find the largest timeslice in the current $missing dayhash; i.e.
+# something like "Days 4 - 6 of ABC and SBS." This works by iterating
+# through the days and looking for overlaps where consecutive days
+# want the same channels.
+sub find_best_timeslice
+{
+    my ($overlap, $a);
+    my $slice = { 'chandays' => 0 };
+
+    foreach my $day (($opt->{offset} ? $opt->{offset} : 0) .. $days-1)
+    {
+	consider_slice($slice, $day, $day, @{$missing->{$day}});
+	$overlap = $missing->{$day};
+	foreach my $nextday (($day + 1) .. $days-1)
+	{
+	    last unless ($missing->{$nextday});
+	    $a = Algorithm::Diff::LCS($overlap, $missing->{$nextday});
+	    last unless ($a and @{$a});
+	    consider_slice($slice, $day, $nextday, @{$a});
+	    $overlap = $a;
+	}
+    }
+    return $slice;
+}
+
+sub consider_slice
+{
+    my ($slice, $startday, $stopday, @chans) = @_;
+
+    my $challenger = ($stopday - $startday + 1) * scalar(@chans);
+    return unless ($challenger > $slice->{chandays});
+
+    # We have a winner!
+    $slice->{start} = $startday;
+    $slice->{stop} = $stopday;
+    $slice->{chans} = [ @chans ];
+    $slice->{chandays} = $challenger;
+}
+
+sub remove_missing_unfillable
+{
+    foreach my $day (keys %{$missing_unfillable}) {
+	next if !defined $missing->{$day};
+	foreach my $ch (@{$missing_unfillable->{$day}}) {
+		@{$missing->{$day}} = grep($_ ne $ch, @{$missing->{$day}});
+	}
+    }
+}
+
+sub add_timeslice_to_missing_unfillable
+{
+    foreach my $day ($timeslice->{start} .. $timeslice->{stop}) {
+	foreach my $ch (@{$timeslice->{chans}}) {
+		push(@{$missing_unfillable->{$day}}, $ch)
+				unless grep($_ eq $ch, @{$missing_unfillable->{$day}});
+	}
+    }
+}
+
+sub display_best_timeslice
+{
+    return sprintf "day%s of channel%s %s (%d channel-day%s).\n",
+	           ($timeslice->{start} == $timeslice->{stop} ?
+		       " $timeslice->{start}" :
+		       "s $timeslice->{start} - $timeslice->{stop}"),
+		   (@{$timeslice->{chans}} > 1 ? 's' : ''),
+		   join(', ', @{$timeslice->{chans}}),
+		   $timeslice->{chandays},
+		   $timeslice->{chandays} == 1 ? '' : 's';
+}
+
+# Creates temporary gaps file suitable for passing to grabbers with
+# --gaps_file option, and records the requested buckets for later
+# analysis by analyze_plugin_data().
+sub record_requested_gaps
+{
+    my ($fn, $timeslice, $grabber) = @_;
+
+    my $gaps;
+    my $gapstr = '';
+
+    # Clear any previously-set gaps
+    delete $plugin_data->{$grabber}->{requested_gaps};
+
+    my $timeslice_epoch_start = $policy{starttime} + ($timeslice->{start} * 24 * 60 * 60);
+    my $timeslice_epoch_end = $policy{starttime} + (($timeslice->{stop} + 1) * 24 * 60 * 60);
+
+    foreach my $ch (@{$timeslice->{chans}})
+    {
+	my $missinglist = $channel_data->{$ch}->{analysis}->{missing_all_epoch};
+	my @a = split(/,/, $missinglist);
+	foreach my $period (@a)
+	{
+	    $period =~ /(\d+)-(\d+)/;
+	    my ($gap_start, $gap_end) = ($1, $2);
+	    if ($gap_start < $timeslice_epoch_end or $gap_end > $timeslice_epoch_start)
+	    {
+		# we want this period
+		push (@{$gaps->{$ch}}, $period);
+
+		# record as requested
+		for (my $etime = $gap_start; $etime <= $gap_end; $etime += $policy{timeslot_size})
+		{
+		    my $bucket = ($etime - $policy{starttime}) / $policy{timeslot_size};
+		    push @{$plugin_data->{$grabber}->{requested_gaps}->{$ch}}, $bucket;
+		}
+	    }
+	}
+	$gapstr .= "$ch:" . join(',', @{$gaps->{$ch}}) . ' ' if ($gaps->{$ch});
+    }
+
+    write_file($fn, 'temporary gaps file', [ $gaps ], [ 'gaps' ]);
+
+    return $gapstr;
+}
+
+# Record what a cacheable C1 grabber has just retrieved for us,
+# so we know next time that this data can be grabbed quickly.
+sub record_cached
+{
+    my ($grabber, @grabbed) = @_;
+
+    &log(1, "SHEPHERD: Recording cache for grabber $grabber.\n");
+
+    my $gcache = $components->{$grabber}->{cached};
+    $gcache = [ ] unless ($gcache);
+    my @newcache;
+    my $today = strftime("%Y%m%d", localtime);
+
+    # remove old chandays
+    foreach my $chanday (@$gcache)
+    {
+	$chanday =~ /(\d+):(.*)/;
+	if ($1 >= $today)
+	{
+	    push (@newcache, $chanday);
+	}
+    }
+
+    # record new chandays
+    foreach my $chanday (@grabbed)
+    {
+	push (@newcache, $chanday) unless (grep(/^$chanday$/, @newcache));
+    }
+    $components->{$grabber}->{cached} = [ @newcache ];
+}
+
+# Takes a dayhash and returns it as a list like this:
+# ( "20061018:ABC", "20061018:Seven", ... )
+sub convert_dayhash_to_list
+{
+    my $h = shift;
+
+    my @ret;
+    foreach my $day (keys %$h)
+    {
+	my $date = substr(DateCalc("today", "+ $day days"), 0, 8);
+	foreach my $ch (@{$h->{$day}})
+	{
+	    push (@ret, "$date:$ch");
+	}
+    }
+    @ret = sort @ret;
+    return \@ret;
+}
+
+
+# If we're about to re-try a grabber, make sure that we're not asking
+# it for the same data. That is, prevent a broken C1 grabber causing
+# an infinite loop.
+sub record_requested_chandays
+{
+    my ($grabber, $slice) = @_;
+
+    &log(1, "SHEPHERD: Recording timeslice request; will not request these chandays " .
+            "from $grabber again.\n");
+
+    # Clear out anything set previously
+    delete $plugin_data->{$grabber}->{requested_data};
+
+    my @requested;
+    for my $day ($slice->{start} .. $slice->{stop})
+    {
+	foreach my $ch (@{$slice->{chans}})
+	{
+	    push @requested, "$day:$ch";
+	    $plugin_data->{$grabber}->{requested_data}->{$ch}[$day] = 1;
+	    # &log(1, "  requesting ch $ch on day $day\n");
+	}
+    }
+    if ($grabbed->{$grabber})
+    {
+	push @{$grabbed->{$grabber}}, @requested;
+    }
+    else
+    {
+	$grabbed->{$grabber} = [ @requested ];
+    }
+}
+
+# If this grabber has been called previously, remove those chandays
+# from the current request -- we don't want to ask it over and over
+# for a timeslice that it has already failed to provide.
+sub cut_down_missing
+{
+    my $grabber = shift;
+
+    $grabber = query_name($grabber);
+    my $dayhash = {};
+
+    # Take the timeslice and expand it to a dayhash, while pruning
+    # any chandays that have previously been requested from this
+    # grabber.
+    foreach my $day ($timeslice->{start} .. $timeslice->{stop})
+    {
+	my @chans;
+	foreach my $ch (@{$timeslice->{chans}})
+	{
+	    unless ($grabbed->{$grabber} and grep($_ eq "$day:$ch", @{$grabbed->{$grabber}}))
+	    {
+		push (@chans, $ch)
+	    }
+	}
+	$dayhash->{$day} = [ @chans ] if (@chans);
+    }
+
+    return $dayhash;
+}
+
+# -----------------------------------------
+# Subs: Analyzing data
+# -----------------------------------------
+
+# interpret xmltv data from this grabber/postprocessor
+sub soak_up_data
+{
+    my ($pluginname, $output, $plugintype, $stage) = @_;
+
+    $components_used .= sprintf " + %s(v%s)", $pluginname, $components->{$pluginname}->{ver};
+    $components_used .= "[tainted]" if (defined $plugin_data->{$pluginname}->{tainted});
+
+    if ($plugintype eq "grabber") {
+	if ((defined $stage) && ($stage eq "paytv")) {
+	    $components_used .= "[ptv]";
+	} else {
+	    $components_used .= "[m]" if ($find_microgaps);
+	}
+    }
+
+    my $plugin = $pluginname;
+    if ($plugintype eq 'grabber')
+    {
+	$plugin .= '-' . query_iteration($pluginname);
+    }
+
+    if (! -r $output) {
+	&log("SHEPHERD: Error: plugin '$pluginname' output file '$output' does not exist\n");
+	$components_used .= "[failed_notfound]";
+	$plugin_data->{$plugin}->{failure_reason} = 'no XMLTV output';
+	return;
+    }
+
+    my $this_plugin = $plugin_data->{$plugin};
+    &log("SHEPHERD: Started parsing XMLTV from '$pluginname' in '$output' .. any errors below are from parser:\n");
+    eval { $this_plugin->{xmltv} = XMLTV::parsefiles($output); };
+    &log("SHEPHERD: Completed XMLTV parsing from '$pluginname'\n");
+
+    # Note: as far as I can tell, XMLTV will ALWAYS return an {xmltv} field, even
+    # if it was unable to parse the file, which makes this little block useless
+    if (!($this_plugin->{xmltv})) {
+	&log("WARNING: Plugin $pluginname didn't seem to return valid XMLTV!\n");
+	$components_used .= "[failed_invalid]";
+	$plugin_data->{$plugin}->{failure_reason} = 'invalid XMLTV';
+	return;
+    }
+
+    $this_plugin->{name} = $pluginname;
+    $this_plugin->{valid} = 1;
+    $this_plugin->{output_filename} = $output;
+
+    my $xmltv = $this_plugin->{xmltv};
+    my ($encoding, $credits, $chan, $progs) = @$xmltv;
+
+    # explicitly track unparsable dates, excessive durations, etc
+    foreach ( qw( programmes total_duration progs_with_invalid_date progs_too_long progs_too_short progs_with_unknown channel progs_outside_window progs_optional progs_tba))
+    {
+	$this_plugin->{$_} = 0;
+    }
+
+    my $seen_channels_with_data = 0;
+
+    #
+    # first iterate through all programmes and see if there are any channels we don't know about
+    #
+    my %chan_xml_list;
+    foreach my $ch (sort keys %{$channels}) {
+	$chan_xml_list{($channels->{$ch})} = $ch;
+    }
+    foreach my $ch (sort keys %{$opt_channels}) {
+	$chan_xml_list{($opt_channels->{$ch})} = $ch;
+    }
+    foreach my $prog (@$progs) {
+	if (!defined $chan_xml_list{($prog->{channel})}) {
+	    $this_plugin->{progs_with_unknown_channel}++;
+	    &log((sprintf " - WARNING: plugin '%s' returned data for unknown channel '%s': ignored.\n",$pluginname,$prog->{channel}));
+	    $chan_xml_list{($prog->{channel})} = 1;	# so we warn only once
+	}
+    }
+	
+    # iterate thru channels
+    foreach my $ch_xmlid (sort keys %chan_xml_list) {
+	my $seen_progs_on_this_channel = 0;
+	my $ch = $chan_xml_list{$ch_xmlid};
+
+	# iterate thru programmes per channel
+	foreach my $prog (@$progs) {
+	    next if ($prog->{channel} ne $ch_xmlid);
+
+	    my $t1 = &parse_xmltv_date($prog->{start});
+	    # Deduct 1 second from end time, so that a show that finishes at
+	    # 2AM is considered to finish at 1:59.59AM, and does not fill 
+	    # the 2AM - 2:05AM bucket.
+	    my $t2 = &parse_xmltv_date($prog->{stop}) - 1;
+
+	    if (!$t1 || !$t2) {
+		&log((sprintf " - WARNING: plugin '%s' returned programme data with invalid timestamp format: \"%s\": can't parse.\n",
+		    $pluginname,(!$t1 ? $prog->{start} : $prog->{stop}))) if (!$this_plugin->{progs_with_invalid_date});
+		$this_plugin->{progs_with_invalid_date}++;
+		next;
+	    }
+
+	    my $this_duration = $t2 - $t1;
+	    # skip if on required channel and too long OR extra long provided title isn't 'close'
+	    if (((defined $channels->{$ch} && $this_duration > $policy{max_programme_length}) ||
+	         ($this_duration > $policy{max_programme_length_opt_channels})) &&
+	        ($prog->{title}->[0]->[0] !~ /\bclose\b/i)) {
+		&log((sprintf " - WARNING: plugin '%s' returned programme data with duration exceeding limit (%dh%dm): ignored.\n",
+		    $pluginname, int($policy{max_programme_length} / 3600),
+		    int(($policy{max_programme_length} % 3600) / 60)))
+		    if (!$this_plugin->{progs_too_long});
+		$this_plugin->{progs_too_long}++;
+		next;
+	    }
+
+	    if ($this_duration < 1) {
+		&log(sprintf "- WARNING: plugin '%s' returned programme data with invalid duration (%s to %s): ignored.\n", $pluginname, $prog->{start}, $prog->{stop});
+		$this_plugin->{progs_too_short}++;
+		next;
+	    }
+
+	    # Don't count shows that are simply 'To Be Advised'
+	    # These will be dropped by the reconciler
+	    if ($prog->{title}->[0]->[0] =~ /^to be advised$/i
+		    or
+		$prog->{title}->[0]->[0] =~ /^tba$/i)
+	    {
+		$this_plugin->{progs_tba}++;
+		next;
+	    }
+
+	    # store plugin-specific stats
+	    $this_plugin->{programmes}++;
+	    $this_plugin->{total_duration} += $this_duration;
+	    $seen_progs_on_this_channel++;
+	    $this_plugin->{earliest_data_seen} = $t1 if (!defined $this_plugin->{earliest_data_seen});
+	    $this_plugin->{earliest_data_seen} = $t1 if ($t1 < $this_plugin->{earliest_data_seen});
+	    $this_plugin->{latest_data_seen} = $t2 if (!defined $this_plugin->{latest_data_seen});
+	    $this_plugin->{latest_data_seen} = $t2 if ($t2 > $this_plugin->{latest_data_seen});
+
+	    # only analyze / check against policy if its a non optional channel
+	    if (defined $channels->{$ch}) {
+
+		# programme is outside the timeslots we are interested in.
+		if ($t1 > $policy{endtime} or $t2 < $policy{starttime})
+		{
+		    $this_plugin->{progs_outside_window}++;
+		    next;
+		}
+
+		# store channel-specific stats
+		$channel_data->{$ch}->{programmes}++;
+		$channel_data->{$ch}->{total_duration} += $this_duration;
+
+		# store timeslot info
+		my $start_slotnum = 0;
+		$start_slotnum = int(($t1 - $policy{starttime}) / $policy{timeslot_size})
+		  if ($t1 >= $policy{starttime});
+
+		my $end_slotnum = ($policy{num_timeslots}-1);
+		$end_slotnum = int(($t2 - $policy{starttime}) / $policy{timeslot_size})
+		  if ($t2 < $policy{endtime});
+
+		$this_plugin->{progs_outside_window}++ if ($end_slotnum < $start_slotnum);
+    
+		&log((sprintf "DEBUG: ch '%s' prog start '%s' stop '%s' storing into timeslots %d-%d (%s-%s)\n",
+		  $ch, $prog->{start}, $prog->{stop}, $start_slotnum, $end_slotnum,
+		  POSIX::strftime("%a%e%b%H:%M", localtime($policy{starttime}+($start_slotnum * $policy{timeslot_size}))),
+		  POSIX::strftime("%a%e%b%H:%M", localtime($policy{starttime}+($end_slotnum * $policy{timeslot_size})))))
+		  if $policy{timeslot_debug};
+
+		# add this programme into the global and per-plugin timeslots table for this channel
+		foreach my $slotnum ($start_slotnum..$end_slotnum) {
+		    $channel_data->{$ch}->{timeslots}[$slotnum]++;
+		    $this_plugin->{timeslots}->{$ch}[$slotnum]++;
+		    $this_plugin->{slots_filled}++;
+		}
+	    } else {
+		$this_plugin->{progs_optional}++;
+	    }
+	}
+
+	$seen_channels_with_data++ if ($seen_progs_on_this_channel > 0);
+    }
+
+    # print some stats about what we saw!
+    &log((sprintf "SHEPHERD: %s '%s' returned data for %d channels, %d programmes, %dd%02dh%02dm%02ds duration, %s%s\n",
+	ucfirst($plugintype), $pluginname, $seen_channels_with_data, $this_plugin->{programmes},
+	int($this_plugin->{total_duration} / 86400),		# days
+	int(($this_plugin->{total_duration} % 86400) / 3600),	# hours
+	int(($this_plugin->{total_duration} % 3600) / 60),	# mins
+	int($this_plugin->{total_duration} % 60),		# sec
+	(defined $this_plugin->{earliest_data_seen} ? POSIX::strftime("%a %e %b %H:%M - ", localtime($this_plugin->{earliest_data_seen})) : 'no data'),
+	(defined $this_plugin->{latest_data_seen} ? POSIX::strftime("%a %e %b %H:%M", localtime($this_plugin->{latest_data_seen})) : '')));
+
+    $this_plugin->{laststatus} = sprintf "%dch/%dpr/%dhrs %s-%s",
+	$seen_channels_with_data, $this_plugin->{programmes},
+	int($this_plugin->{total_duration} / 3600),
+	(defined $this_plugin->{earliest_data_seen} ? POSIX::strftime("%a%d%b", localtime($this_plugin->{earliest_data_seen})) : 'no'),
+	(defined $this_plugin->{latest_data_seen} ? POSIX::strftime("%a%d%b", localtime($this_plugin->{latest_data_seen})) : 'data');
+
+    if (!$this_plugin->{slots_filled} and !&query_config($pluginname, 'type'))
+    {
+	# Call this a failure if there was some kind of weirdness. If
+	# the grabber genuinely couldn't retrieve any shows for the 
+	# requested period, that's MISSING_DATA, but if it did and
+	# we couldn't understand them, that's a FAIL.
+
+	if ($this_plugin->{progs_with_invalid_date}
+		or
+	    $this_plugin->{progs_too_long}
+		or
+	    $this_plugin->{progs_too_short}
+		or
+	    $this_plugin->{progs_outside_window}
+		or
+	    $this_plugin->{progs_with_unknown_channel}
+		or
+	    $this_plugin->{progs_optional})
+	{
+	    $this_plugin->{valid} = 0;
+	    $components_used .= '[failed_unparseable]';
+	    $this_plugin->{failure_reason} = 
+		sprintf "Unparseable: %d ch, %d shows, %d dur, %d slots, %d invalid_date, %d too_long, %d too_short, %d outside_window, %d unknown_channel, %d optional",
+		    $seen_channels_with_data, 
+		    $this_plugin->{programmes},
+		    $this_plugin->{total_duration},
+		    $this_plugin->{slots_filled},
+		    $this_plugin->{progs_with_invalid_date},
+		    $this_plugin->{progs_too_long},
+		    $this_plugin->{progs_too_short},
+		    $this_plugin->{progs_outside_window},
+		    $this_plugin->{progs_with_unknown_channel},
+		    $this_plugin->{progs_optional};
+	}
+    }
+
+    $plugin_data->{$plugin} = $this_plugin;
+}
+
+
+# analyze grabber data - do we have all the data we want?
+#  this can analyze either the cumulative data from ALL plugins ($proggy="shepherd")
+#  or can analyze the data from one specific plugin
+
+sub analyze_plugin_data
+{
+    my ($analysisname, $quiet, $proggy, $iteration) = @_;
+    &log("SHEPHERD: $analysisname:\n") unless $quiet;
+
+    my $total_channels = 0;
+    my $plugin_epoch_missing_data = "";
+    my $overall_data_ok = 1; # until proven otherwise
+    my $total_missing = 0;
+    my $total_data = 0;
+    my $plugin = $proggy;
+    $plugin .= "-$iteration" if (defined $iteration);
+
+    # iterate across each channel
+    foreach my $ch (sort keys %{$channels}) {
+
+	# if we're analyzing data for a grabber and it doesn't support this channel, skip it
+	if (($proggy ne $progname) &&
+	    ($components->{$proggy}->{type} eq "grabber") &&
+	    (supports_channel($proggy, $ch, 1) == 0)) {
+		&log(1, (sprintf "DEBUG: analysis of channel %s for plugin %s skipped since plugin doesn't support channel\n",
+		    $ch, $proggy));
+		next;
+	}
+
+	$total_channels++;
+
+	my $data;
+	my $lastpol = "";
+	$data->{data_ok} = 1; # unless proven otherwise
+	$data->{have} = 0;
+	$data->{missing} = 0;
+
+	for my $slotnum (0..($policy{num_timeslots}-1)) {
+	    my $bucket_start_offset = ($slotnum * $policy{timeslot_size});
+
+	    # work out day number of when this bucket is.
+	    # number from 0 onwards.  (i.e. today=0).
+	    # for a typical 7 day grabber this will actually mean 8 days of data (0-7)
+	    # with days 0 and 7 truncated to half-days
+	    my $day = int(($bucket_start_offset + $policy{first_bucket_offset}) / 86400);
+	    $day += $opt->{offset} if ($opt->{offset});
+
+	    if (!defined $data->{day}->[$day]) {
+		$data->{day}->[$day]->{num} = $day;
+		$data->{day}->[$day]->{have} = 0;
+		$data->{day}->[$day]->{missing} = 0;
+		$data->{day}->[$day]->{missing_peak} = 0;
+		$data->{day}->[$day]->{missing_nonpeak} = 0;
+		$data->{day}->[$day]->{missing_other} = 0;
+
+		$data->{day}->[$day]->{day_ok} = 1; # until proven otherwise
+
+		# day changed, dump any 'already_missing' data
+		&dump_already_missing($data, $proggy);
+	    }
+
+	    # we have programming data for this bucket.  great!  process next bucket
+	    if ((($proggy eq $progname) &&
+	         (defined $channel_data->{$ch}->{timeslots}[$slotnum]) &&
+	         ($channel_data->{$ch}->{timeslots}[$slotnum] > 0)) ||
+	        (($proggy ne $progname) &&
+	         (defined $plugin_data->{$plugin}->{timeslots}->{$ch}[$slotnum]) &&
+	         ($plugin_data->{$plugin}->{timeslots}->{$ch}[$slotnum] > 0))) {
+		# if we have missing data queued up, push it now
+		&dump_already_missing($data, $proggy);
+		&dump_already_missing_period($data->{day}->[$day],$lastpol) if ($lastpol ne "");
+
+		$data->{day}->[$day]->{have} += $policy{timeslot_size};
+		$data->{have} += $policy{timeslot_size};
+		next;
+	    }
+
+	    # some grabbers take HOURS to run. if this bucket (missing data) is for
+	    # a time period now in the past, then don't include it
+	    next if (($bucket_start_offset + $policy{starttime}) < time);
+
+	    # we don't have programming for this channel for this bucket
+	    &log((sprintf "DEBUG: missing timeslot data for ch '%s' bucket %d (%s)\n",
+		$ch, $slotnum, POSIX::strftime("%a%e%b%H:%M", localtime($policy{starttime}+($slotnum * $policy{timeslot_size})))))
+		if $policy{timeslot_debug};
+
+
+	    if (($proggy ne $progname) && ($components->{$proggy}->{type} eq "grabber")) {
+		# if we're analyzing data for a grabber and it doesn't have data for this
+		# channel on this day, don't record it as missing data if:
+		#   1. grabber doesn't reliably support this day
+		#   2. we didn't _request_ the data for this channel/day (C1 grabbers only)
+		#   3. grabber doesn't reliably support this channel
+
+		my $ignore_missing = 0; # don't ignore missing unless proven otherwise
+
+		# 1. ignore if it exceeds 'max_reliable_days' for this grabber
+		if (supports_day($proggy,$day) != 1) {
+		    $ignore_missing++;
+		    &log((sprintf "DEBUG: analysis of plugin '%s' skipping missing data channel '%s' for day %d due to max_reliable_days\n",
+			$proggy, $ch, $day)) if ($policy{timeslot_debug});
+		}
+
+		# 2(a). ignore if we didn't request data for channel/day (C1 grabbers)
+		if ((query_config($proggy, 'category') == 1) &&
+		    (!defined $plugin_data->{$proggy}->{requested_data}->{$ch}[$day])) {
+		    $ignore_missing++;
+		    &log((sprintf "DEBUG: analysis of plugin '%s' skipping missing data channel '%s' for day %d due to not requested\n",
+			$proggy, $ch, $day)) if ($policy{timeslot_debug});
+		}
+
+		# 2(b). ignore if we didn't request this gap (C1 grabbers)
+		if ($find_microgaps
+			and
+		    &query_config($proggy, 'category') == 1
+			and
+		    grep ($_ ne $slotnum, @{$plugin_data->{$proggy}->{requested_gaps}->{$ch}}))
+		{
+		    $ignore_missing++;
+		    &log((sprintf "DEBUG: analysis of plugin '%s' skipping missing data channel '%s' due to bucket %d being outside requested gap\n",
+			    $proggy, $ch, $slotnum)) if ($policy{timeslot_debug});
+		}
+
+		# 3. ignore if this grabber can't reliably supply this channel
+		if (supports_channel($proggy,$ch,$day) != 1) {
+		    $ignore_missing++;
+		    &log((sprintf "DEBUG: analysis of plugin '%s' skipping missing data channel '%s' for day %d due to cannot-supply\n",
+			$proggy, $ch, $day)) if ($policy{timeslot_debug});
+		}
+
+		if ($ignore_missing > 0) {
+		    # if we have missing data queued up, push it now
+		    &dump_already_missing($data, $proggy);
+		    &dump_already_missing_period($data->{day}->[$day],$lastpol) if ($lastpol ne "");
+		    next;
+		}
+	    }
+
+
+	    if (($proggy ne $progname) && ($components->{$proggy}->{type} ne "grabber")) {
+		# if we're analyzing data for a reconciler/postprocessor and it doesn't have
+		# data for a timeslot, only record that as an error if the source data _was_
+		# previously available in the 'overall' data
+
+		if ((!defined $channel_data->{$ch}->{timeslots}[$slotnum]) ||
+		    ($channel_data->{$ch}->{timeslots}[$slotnum] == 0)) {
+		    &log((sprintf "DEBUG: analysis of plugin '%s' skipping missing data channel '%s' for day %d due to not-in-overall-data\n",
+			$proggy, $ch, $day)) if ($policy{timeslot_debug});
+		    next;
+		}
+	    }
+
+	    # work out the localtime of when this bucket is
+	    my $bucket_seconds_offset = ($bucket_start_offset + $policy{first_bucket_offset}) % 86400;
+
+	    # store details of where we are missing data
+	    if (!defined $data->{already_missing}) {
+		$data->{already_missing} = sprintf "#%d/%02d:%02d",
+		  $day,
+		  int($bucket_seconds_offset / 3600),
+		  int(($bucket_seconds_offset % 3600) / 60);
+		$data->{already_missing_epoch} = $policy{starttime} + $bucket_start_offset;
+	    }
+	    $data->{already_missing_last} = $bucket_seconds_offset + $policy{timeslot_size} - 1;
+	    $data->{already_missing_last_epoch} = $policy{starttime} + $bucket_start_offset + $policy{timeslot_size} - 1;
+
+	    $data->{day}->[$day]->{missing} += $policy{timeslot_size};
+	    $data->{missing} += $policy{timeslot_size};
+
+	    # work out what policy missing data for this bucket fits into
+	    my $pol;
+	    if (($bucket_seconds_offset >= $policy{peak_start}) &&
+	        (($bucket_seconds_offset+$policy{timeslot_size}) <= $policy{peak_stop})) {
+		$pol = "peak";
+	    } elsif (($bucket_seconds_offset >= $policy{nonpeak_start}) &&
+	             (($bucket_seconds_offset+$policy{timeslot_size}) <= $policy{nonpeak_stop})) {
+		$pol = "nonpeak";
+	    } else {
+		$pol = "other";
+	    }
+
+	    &dump_already_missing_period($data->{day}->[$day],$lastpol)
+	      if (($lastpol ne $pol) && ($lastpol ne ""));
+
+	    $lastpol = $pol;
+
+	    $data->{day}->[$day]->{"missing_".$pol} += $policy{timeslot_size};
+
+	    $data->{day}->[$day]->{"already_missing_".$pol."_start"} = $bucket_seconds_offset
+	      if (!defined $data->{day}->[$day]->{"already_missing_".$pol."_start"});
+	    $data->{day}->[$day]->{"already_missing_".$pol."_stop"} = $bucket_seconds_offset + $policy{timeslot_size} - 1;
+
+	    $data->{day}->[$day]->{day_ok} = 0 if ($data->{day}->[$day]->{missing_peak} > $policy{peak_max_missing});
+	    $data->{day}->[$day]->{day_ok} = 0 if ($data->{day}->[$day]->{missing_nonpeak} > $policy{nonpeak_max_missing});
+	    $data->{day}->[$day]->{day_ok} = 0 if ($data->{day}->[$day]->{missing_other} > $policy{other_max_missing});
+	    $data->{data_ok} = 0 if ($data->{day}->[$day]->{day_ok} == 0);
+	    $overall_data_ok = 0 if ($data->{data_ok} == 0);
+	}
+
+	# finished all timeslots in this channel.
+	# if we have missing data queued up, push it now
+	&dump_already_missing($data, $proggy);
+
+	# fill in any last missing period data
+	foreach my $day (@{($data->{day})}) {
+	    &dump_already_missing_period($day,"peak");
+	    &dump_already_missing_period($day,"nonpeak");
+	    &dump_already_missing_period($day,"other");
+	}
+
+	my $statusstring = sprintf " > ch %s: %s%s\n", 
+	  $ch, 
+	  $data->{have} ? ($data->{missing} ? ($data->{data_ok} ? "PASS (within policy thresholds)" : "FAIL (missing data exceeds policy thresholds):") : "PASS (complete)") : "FAIL (no data):",
+	  $data->{have} ? ", have " . pretty_duration($data->{have}) : '';
+
+	# display per-day missing data statistics
+	foreach my $day (@{($data->{day})}) {
+	    next unless ($day->{missing});
+
+	    $statusstring .= sprintf "\t".(strftime("%a %e %b",localtime($policy{starttime} + (($day->{num} - ($opt->{offset} or 0)) * 86400)))).": missing ";
+	    if ($day->{have})
+	    {
+		$statusstring .= pretty_duration($day->{missing}) . ": ";
+
+		# do we have any data for this day?
+		$statusstring .= "peak ".join(", ",(@{($day->{missing_peak_table})}))
+	          if (($day->{missing_peak}) && ($day->{missing_peak}));
+
+		$statusstring .= sprintf "%snon-peak %s",
+		  ($day->{missing_peak} ? " / " : ""),
+		  join(", ",(@{($day->{missing_nonpeak_table})}))
+		  if (($day->{missing_nonpeak}) && ($day->{missing_nonpeak}));
+
+		$statusstring .= sprintf "%sother %s",
+		  (($day->{missing_peak} + $day->{missing_nonpeak}) > 0 ? " / " : ""),
+		  join(", ",(@{($day->{missing_other_table})}))
+		  if (($day->{missing_other}) && ($day->{missing_other}));
+	    }
+	    else
+	    {
+		$statusstring .= "entire day";
+	    }
+	    $statusstring .= "\n";
+	}
+	&log($statusstring) unless $quiet;
+	$data->{statusstring} = $statusstring;
+	$plugin_epoch_missing_data .= sprintf "%s:%s\t",$ch,$data->{missing_all_epoch} if (defined $data->{missing_all_epoch});
+	$total_missing += $data->{missing};
+	$total_data += $data->{have};
+
+	if ($proggy eq $progname) {
+	    delete $channel_data->{$ch}->{analysis} if (defined $channel_data->{$ch}->{analysis});
+	    $channel_data->{$ch}->{analysis} = $data;
+	} else {
+	    delete $plugin_data->{$plugin}->{analysis}->{$ch} if (defined $plugin_data->{$plugin}->{analysis}->{$ch});
+	    $plugin_data->{$plugin}->{analysis}->{$ch} = $data;
+	}
+    }
+
+    &log((sprintf " > OVERALL: [%2.2f%%] %s\n", 
+	           ($total_data + $total_missing > 0 ? (100 * $total_data / ($total_data + $total_missing)) : 0),
+	          ($total_missing ? ($overall_data_ok ? "PASS (within policy thresholds)" : "FAIL (exceeds policy thresholds)") : "PASS (complete)")))
+	  unless $quiet;
+
+    if ($plugin_epoch_missing_data ne '') {
+	&add_pending_message($proggy, 'MISSING_DATA', $plugin_epoch_missing_data) unless ($plugin_data->{tainted});
+    } elsif ($proggy eq $progname) {
+	delete $pending_messages->{$progname}->{MISSING_DATA};
+    }
+
+    if ($proggy eq $progname) {
+	$plugin_data->{$progname}->{total_missing} = $total_missing;
+	$plugin_data->{$progname}->{total_duration} = $total_data;
+	$data_found_all = ($total_missing ? 0 : 1);
+	$data_satisfies_policy = $overall_data_ok;
+    }
+    return $overall_data_ok; # return 1 for satisifies policy, 0 for need more
+}
+
+# helper routine for filling in 'missing_all' array
+sub dump_already_missing
+{
+    my ($d, $proggy) = @_;
+
+    if (defined $d->{already_missing}) 
+    {
+	if (defined $d->{already_missing_last})
+	{
+	    $d->{already_missing} .= sprintf "-%02d:%02d",
+	                                     int($d->{already_missing_last} / 3600),
+					     int(($d->{already_missing_last} % 3600) / 60);
+	}
+
+        push(@{($d->{missing_all})}, $d->{already_missing});
+
+	$d->{already_missing_epoch} .= sprintf "-%d",$d->{already_missing_last_epoch};
+
+	# Don't report noncritical data holes in grabbers we know have those. 
+	#
+	# Two things to note here:
+	# 1. We can only do this for individual grabbers, not Shepherd overall;
+	#    $plugin_data -> 'missing_all_epoch' is used for further analysis 
+	#    at the Shepherd & channel levels, not just stats reporting.
+	# 2. Normally we flag data as '$ignore_missing++' in &analyse_plugin_data,
+	#    but that loops through individual buckets: it knows whether each
+	#    bucket is filled or not but not how large each gap is.
+	unless (&query_config($proggy, 'has_noncritical_gaps') and &is_noncritical_gap($d->{already_missing_epoch}))
+	{
+	    $d->{missing_all_epoch} .= "," if (defined $d->{missing_all_epoch});
+	    $d->{missing_all_epoch} .= $d->{already_missing_epoch};
+	}
+
+	delete $d->{already_missing};
+	delete $d->{already_missing_last};
+
+	delete $d->{already_missing_epoch};
+	delete $d->{already_missing_last_epoch};
+    }
+}
+
+# helper routine for filling in per-day missing data
+# specific to peak/nonpeak/other
+sub dump_already_missing_period
+{
+    my ($d,$p) = @_;
+    my $startvar = "already_missing_".$p."_start";
+    my $stopvar = "already_missing_".$p."_stop";
+
+    if (defined $d->{$startvar}) {
+	push(@{($d->{"missing_".$p."_table"})},
+	  sprintf "%02d:%02d-%02d:%02d",
+	    int($d->{$startvar} / 3600),
+	    int(($d->{$startvar} % 3600) / 60),
+	    int($d->{$stopvar} / 3600),
+	    int(($d->{$stopvar} % 3600) / 60));
+	delete $d->{$startvar};
+	delete $d->{$stopvar};
+    }
+}
+
+# Don't bother reporting small gaps when we already know that this
+# grabber tends to have them.
+#
+# It's actually difficult to say exactly which gaps are critical
+# (or policy-violating), because our analysis operates on a 
+# per-day basis, not per-gap -- for example, four 5-minute gaps
+# in prime time is a policy violation, even though each individual
+# gap isn't. So our solution is not perfect: we are simply 
+# disregarding SMALL gaps, regardless of how many there are.
+#
+# A gap is considered non-critical if it's:
+# (a) in peak time and less than 15 minutes long; or
+# (b) in nonpeak time and less than 30 minutes long; or
+# (c) in other time and less than 25 minutes long
+sub is_noncritical_gap
+{
+    my $gap = shift;
+
+    return 0 unless ($gap =~ /(\d+)-(\d+)/);
+    my $zero_hr = $policy{starttime} - $policy{first_bucket_offset};
+
+    my $gap_start = (($1 - $zero_hr) % 86400);
+    my $gap_stop = (($2 - $zero_hr) % 86400);
+    my $diff = $gap_stop - $gap_start;
+
+    if ($gap_start <= $policy{peak_stop} and $gap_stop >= $policy{peak_start})
+    {
+	# PEAK
+	return ($diff < 15*60);
+    }
+    elsif ($gap_start <= $policy{nonpeak_stop} and $gap_stop >= $policy{nonpeak_start})
+    {
+	# NONPEAK
+	return ($diff < 30*60);
+    }
+    else
+    {
+	# OTHER
+	return ($diff < 25*60);
+    }
+}
+
+# given a duration (seconds), return it in a pretty "{days}d{hr}h{min}m" string
+# and indication of whether the duration is over its threshold or not
+sub pretty_duration
+{
+    my ($d,$crit) = @_;
+    my $s = "";
+    $s .= sprintf "%dd",int($d / (60*60*24)) if ($d >= (60*60*24));
+    $s .= sprintf "%dh",int(($d % (60*60*24)) / (60*60)) if (($d % (60*60*24)) >= (60*60));
+    $s .= sprintf "%dm",int(($d % (60*60)) / 60) if (($d % (60*60)) >= 60);
+    $s .= sprintf "%ds",int($d % 60) if (($s eq "") && ($d > 0));
+    $s .= "no" if ($s eq "");
+
+    if (defined $crit) {
+	$s .= "[!]" if ($d > $crit);
+    }
+    return $s;
+}
+
+# work out date range we are expecting data to be in
+sub calc_date_range
+{
+
+    $policy{starttime} = time;
+
+    # set endtime as per $days less 1 day + hours left today
+    $policy{endtime} = $policy{starttime} + ((60*60*24)*($days-1)) + (86400 - (($policy{starttime} + $gmt_offset) % 86400));
+
+    # normalize starttime to beginning of next bucket
+    $policy{starttime} += ($policy{timeslot_size} - ($policy{starttime} % $policy{timeslot_size}));
+
+    # work out how many seconds into a day our first bucket starts
+    $policy{first_bucket_offset} = ($policy{starttime} + $gmt_offset) % 86400;
+
+    # normalize endtime to end of previous bucket
+    $policy{endtime} -= ($policy{endtime} % $policy{timeslot_size});
+
+    # if we are working with an --offset, apply it now.
+    $policy{starttime} += (86400 * $opt->{offset}) if ($opt->{offset});
+
+    # work out number of buckets
+    $policy{num_timeslots} = ($policy{endtime} - $policy{starttime}) / $policy{timeslot_size};
+
+    &log((sprintf "DEBUG: policy settings: starttime=%d, endtime=%d, first_bucket_offset=%d, gmt_offset=%d, strftime_tz=%s\n",
+	$policy{starttime}, $policy{endtime}, $policy{first_bucket_offset}, $gmt_offset,
+	(strftime("%z", localtime(time)))))
+	if ($policy{timeslot_debug});
+}
+
+sub calc_gmt_offset
+{
+    # work out GMT offset - we only do this once
+    if (!$gmt_offset) {
+        # work out our gmt offset
+        my $tzstring = strftime("%z", localtime(time));
+
+        $gmt_offset = (60*60) * int(substr($tzstring,1,2));     # hr
+        $gmt_offset += (60 * int(substr($tzstring,3,2)));       # min
+        $gmt_offset *= -1 if (substr($tzstring,0,1) eq "-");    # +/-
+    }
+}
+
+# strptime type date parsing - BUT - if no timezone is present, treat time as being in localtime
+# rather than the various other perl implementation which treat it as being in UTC/GMT
+sub parse_xmltv_date
+{
+    my $datestring = shift;
+    my @t; # 0=sec,1=min,2=hour,3=day,4=month,5=year,6=wday,7=yday,8=isdst
+    my $tz_offset = 0;
+
+    if ($datestring =~ /^(\d{4})(\d{2})(\d{2})(\d{2})(\d{2})/) {
+	($t[5],$t[4],$t[3],$t[2],$t[1],$t[0]) = (int($1)-1900,int($2)-1,int($3),int($4),int($5),0);
+	($t[6],$t[7],$t[8]) = (-1,-1,-1);
+
+	# if input data has a timezone offset, then offset by that
+	if ($datestring =~ /\+(\d{2})(\d{2})/) {
+	    $tz_offset = $gmt_offset - (($1*(60*60)) + ($2*60));
+	} elsif ($datestring =~ /\-(\d{2})(\d{2})/) {
+	    $tz_offset = $gmt_offset + (($1*(60*60)) + ($2*60));
+	}
+
+	my $e = mktime(@t);
+	return ($e+$tz_offset) if ($e > 1);
+    }
+    return undef;
+}
+
+# -----------------------------------------
+# Subs: Reconciling data
+# -----------------------------------------
+
+# for all the data we have, try to pick the best bits!
+sub reconcile_data
+{
+    &log("\nReconciling data:\n\n");
+
+    my $num_grabbers = 0;
+    my $input_files = "";
+    my @input_file_list;
+
+    # when reconciling & postprocessing, increase the thresholds of how much
+    # missing data we permit.
+    # generally, if a postprocessor or reconciler breaks, it'll return
+    # no data rather than 'most' data.
+    $policy{peak_max_missing} *= 3;
+    $policy{nonpeak_max_missing} *= 1.5;
+    $policy{other_max_missing} *= 3;
+
+    &log("Preferred title preferences from '$pref_title_source'\n")
+	if ((defined $pref_title_source) &&
+	    ($plugin_data->{$pref_title_source}) &&
+	    ($plugin_data->{$pref_title_source}->{valid}));
+
+    &log("Preference for whose data we prefer as follows:\n");
+    foreach my $proggy (sort { $components->{$b}->{config}->{quality} <=> $components->{$a}->{config}->{quality} } query_grabbers()) {
+	next if ($components->{$proggy}->{disabled});
+	next if (defined $plugin_data->{$proggy}->{failed_test});
+
+	foreach my $plugin (keys %$plugin_data) {
+	    next unless (($plugin =~ /^$proggy-\d+$/) 
+			    and 
+			($plugin_data->{$plugin})
+			    and 
+			($plugin_data->{$plugin}->{valid}));
+	    $num_grabbers++;
+	    &log((sprintf "  %d. %s (%s)\n", $num_grabbers, $proggy, $plugin_data->{$plugin}->{output_filename}));
+
+	    $input_files .= $plugin_data->{$plugin}->{output_filename}." ";
+	    push(@input_file_list,$plugin_data->{$plugin}->{output_filename});
+	}
+    }
+
+    if ($num_grabbers == 0) {
+	&log("ERROR! Nothing to reconcile! No valid grabber data!\n");
+	return 0;
+    }
+
+    foreach my $reconciler (sort { $components->{$a} <=> $components->{$b} } query_reconcilers()) {
+	next if ($components->{$reconciler}->{disabled});
+	next if (defined $plugin_data->{$reconciler}->{failed_test});
+	next if (!$components->{$reconciler}->{ready});
+
+	$reconciler_found_all_data = &call_data_processor("reconciler",$reconciler,$input_files);
+
+	if ((!$reconciler_found_all_data) && ($data_found_all)) {
+	    # urgh.  this reconciler did a bad bad thing ...
+	    &log("SHEPHERD: XML data from reconciler $reconciler appears bogus, will try to use another reconciler\n");
+	} else {
+	    &log("SHEPHERD: Data from reconciler $reconciler looks good\n");
+	    $input_postprocess_file = $plugin_data->{$reconciler}->{output_filename};
+	}
+
+	last if ($input_postprocess_file ne "");
+    }
+
+    if ($input_postprocess_file eq "") {
+	# no reconcilers worked!!
+	&log("SHEPHERD: WARNING: No reconcilers seemed to work!  Falling back to concatenating the data together!\n");
+
+	my %w_args = ();
+	$input_postprocess_file = "$CWD/input_preprocess.xmltv";
+	my $fh = new IO::File ">$input_postprocess_file" || die "could not open $input_postprocess_file for writing: $!\n";
+	%w_args = (OUTPUT => $fh);
+	XMLTV::catfiles(\%w_args, @input_file_list);
+    }
+    return 1;
+}
+
+
+# -----------------------------------------
+# Subs: Postprocessing
+# -----------------------------------------
+
+sub postprocess_data
+{
+    # for our first postprocessor, we feed it ALL of the XMLTV files we have
+    # as each postprocessor runs, we feed in the output from the previous one
+    # Shepherd checks the "completeness" of the data that comes out of a postprocessor & automatically
+    # reverts back to the previous postprocessor if it was shown to be bad
+
+    # first time around: feed in reconciled data ($input_postprocess_file)
+
+    &log("\nSHEPHERD: Postprocessing stage:\n");
+
+    foreach my $postprocessor (sort { $components->{$a} <=> $components->{$b} } query_postprocessors()) {
+	next if ($components->{$postprocessor}->{disabled});
+	next if (defined $plugin_data->{$postprocessor}->{failed_test});
+	next if (!$components->{$postprocessor}->{ready});
+
+	my $found_all_data = call_data_processor("postprocessor",$postprocessor,$input_postprocess_file);
+
+	if ($found_all_data) {
+	    # accept what this postprocessor did to our output ...
+	    &log("SHEPHERD: accepting output from postprocessor $postprocessor, feeding it into next stage\n");
+	    $input_postprocess_file = $plugin_data->{$postprocessor}->{output_filename};
+	    next;
+	}
+
+	# urgh.  this postprocessor did a bad bad thing ...
+	&log("SHEPHERD: XML data from postprocessor $postprocessor rejected, using XML from previous stage\n");
+    }
+}
+
+
+# -----------------------------------------
+# Subs: Postprocessing/Reconciler helpers
+# -----------------------------------------
+
+sub call_data_processor
+{
+    my ($data_processor_type, $data_processor_name, $input_files) = @_;
+
+    &log("\nSHEPHERD: Using $data_processor_type: $data_processor_name\n");
+
+    my $output = sprintf "%s/%ss/%s/output.xmltv",$CWD,$data_processor_type,$data_processor_name;
+    my $comm = sprintf "%s/%ss/%s/%s",$CWD,$data_processor_type,$data_processor_name,$data_processor_name;
+    $comm .= " --region $region" .
+             " --channels_file $channels_file" .
+             " --output $output";
+    $comm .= " --days $days" if ($days);
+    $comm .= " --offset $opt->{offset}" if ($opt->{offset});
+    $comm .= " --debug" if ($debug);
+    $comm .= " @ARGV" if (@ARGV);
+
+    $comm .= " --preftitle ".$plugin_data->{$pref_title_source}->{output_filename}
+      if (($data_processor_type eq "reconciler") &&
+          (defined $pref_title_source) &&
+          ($plugin_data->{$pref_title_source}) &&
+          ($plugin_data->{$pref_title_source}->{valid}));
+
+    $comm .= " $input_files";
+    &log("SHEPHERD: Executing command: $comm\n");
+
+    if (-e $output)
+    {
+	&log(1, "SHEPHERD: Removing old output file: $output\n");
+	unlink($output) or &log("SHEPHERD: Failed to remove old output file: $output\n$!\n");
+    }
+    my $component_start = time;
+    my ($retval,$msg) = call_prog($data_processor_name,$comm,0,(query_config($data_processor_name,'max_runtime')*60));
+    my $component_duration = time - $component_start;
+
+    if ($retval) {
+	&log("$data_processor_type exited with non-zero code $retval: assuming it failed.\n" .
+	     "Last message: $msg\n");
+	$components->{$data_processor_name}->{laststatus} = "Failed ($retval)";
+	$components->{$data_processor_name}->{consecutive_failures}++;
+	&add_pending_message($data_processor_name,"FAIL", $retval.":".$msg, $component_start, $component_duration,
+	    $components->{$data_processor_name}->{ver}, $components->{$data_processor_name}->{consecutive_failures});
+	return 0;
+    }
+
+    delete $components->{$data_processor_name}->{conescutive_failures};
+
+    #
+    # soak up the data we just collected and check it
+    # YES - these are the SAME routines we used in the previous 'grabber' phase
+    # but the difference here is that we clear out our 'channel_data' beforehand
+    # so we can independently analyze the impact of this postprocessor.
+    # if it clearly returns bad data, don't use that data (go back one step) and
+    # flag the postprocessor as having failed.  after 3 consecutive failures, disable it
+    #
+
+    # clear out channel_data
+    foreach my $ch (keys %{$channels}) {
+	delete $channel_data->{$ch};
+    }
+
+    # process and analyze it!
+    &soak_up_data($data_processor_name, $output, $data_processor_type);
+
+    my $have_all_data = 0;
+    if ((defined $plugin_data->{$data_processor_name}) &&
+        (defined $plugin_data->{$data_processor_name}->{valid})) {
+	$have_all_data = &analyze_plugin_data("$data_processor_type $data_processor_name",0,$data_processor_name);
+    }
+
+    if ($have_all_data) {
+	$components->{$data_processor_name}->{laststatus} = $plugin_data->{$data_processor_name}->{laststatus};
+	$components->{$data_processor_name}->{lastdata} = time;
+	delete $components->{$data_processor_name}->{consecutive_failures}
+	  if (defined $components->{$data_processor_name}->{consecutive_failures});
+	&add_pending_message($data_processor_name,"SUCCESS", $retval, $component_start, $component_duration,
+	    $components->{$data_processor_name}->{ver}, 0);
+    } else {
+	$components->{$data_processor_name}->{laststatus} = "missing data: ".$plugin_data->{$data_processor_name}->{laststatus};
+	$components->{$data_processor_name}->{consecutive_failures}++;
+	&add_pending_message($data_processor_name,"FAIL", $retval.":".$msg, $component_start, $component_duration,
+	    $components->{$data_processor_name}->{ver}, $components->{$data_processor_name}->{consecutive_failures});
+    }
+
+    return $have_all_data;
+}
+
+# We test out ability to write to the output file early, since if
+# that fails there's no point continuing.
+sub test_output_file
+{
+    my $fh = new IO::File(">>$output_filename")
+	or die "Can't open $output_filename for writing: $!";
+    $fh->close;
+}
+
+sub output_data
+{
+    my $reuse_cached_output = shift;
+    $reuse_cached_output = 0 if (!defined $reuse_cached_output);
+    
+    my $output_cache_copy = "$CWD/output.xmltv";
+
+    if ($reuse_cached_output) {
+	# re-use existing cached output
+	$input_postprocess_file = $output_cache_copy;
+    }
+
+    if ($output_filename eq $input_postprocess_file) {
+	# nothing to do - the input is the same as the output
+	&log("Re-using existing output $output_filename\n");
+    }
+    else {
+	my %writer_args = ( encoding => 'ISO-8859-1' );
+	my $fh = new IO::File(">$output_filename") || die "Can't open $output_filename for writing: $!";
+	$writer_args{OUTPUT} = $fh;
+
+	$writer = new XMLTV::Writer(%writer_args);
+	$writer->start( {
+		'source-info-name' => "$progname v".$components->{$progname}->{ver},
+		'generator-info-name' => $components_used } );
+
+	XMLTV::parsefiles_callback(undef, undef, \&output_data_channel_cb, 
+	    \&output_data_programme_cb, $input_postprocess_file);
+	$writer->end();
+	$fh->close;
+
+	&log("Final output stored in $output_filename.\n");
+
+	# copy final output to our cache copy as well
+	if ($output_filename ne $output_cache_copy) {
+	    unlink($output_cache_copy);
+	    open(F1,"<$output_filename");
+	    open(F2,">$output_cache_copy");
+	    while (<F1>) {
+		print F2 $_;
+	    }
+	    close(F1);
+	    close(F2);
+	}
+	&log("Cached output stored in $output_cache_copy.\n");
+    }
+
+    if (!$opt->{'output'} and !$opt->{'nooutput'}) {
+	&log("\nPrinting XMLTV output to STDOUT in 5 seconds...\n");
+	sleep 5;
+	my $fh = new IO::File("< $output_filename") || die "Can't open $output_filename for reading: $!";
+	print <$fh>;
+	$fh->close;
+    }
+}
+
+sub output_data_channel_cb
+{
+    my $c = shift;
+    $writer->write_channel($c);
+}
+
+sub output_data_programme_cb
+{
+    my $prog=shift;
+    $writer->write_programme($prog);
+}
+
+# -----------------------------------------
+# Subs: Tor support
+# -----------------------------------------
+
+sub start_tor
+{
+    # do we have any components requesting the use of tor?
+    my $want_tor = 0;
+    foreach (query_grabbers()) {
+	unless (($components->{$_}->{disabled}) || (defined $plugin_data->{$_}->{failed_test})) {
+	    $want_tor++ if (query_config($_, 'option_anon_socks'));
+	}
+    }
+
+    return if ($want_tor == 0);
+
+    # try to find tor
+    my $searchpath = ".:/usr/sbin:".$ENV{PATH};
+    my $found_tor;
+    foreach my $dir (split(/:/,$searchpath)) {
+	if ((-x "$dir/tor") && (-f "$dir/tor")) {
+	    $found_tor = "$dir/tor";
+	    last;
+	}
+    }
+
+    if (!defined $found_tor) {
+	&log("\nWARNING: $want_tor components wanted to use Tor but could not find it.\n");
+	&log("This may cause data collection to run slower than it otherwise would.\n");
+	return;
+    }
+
+    # we'll run our own local copy of Tor exclusively for shepherd
+    my $tordir = $CWD."/tor";
+    if (!-d $tordir) {
+	if (!mkdir $tordir) {
+	    &log("\nWARNING: Could not create $tordir, Tor not started!\n");
+	    &log("This may cause data collection to run slower than it otherwise would.\n");
+	    return;
+	}
+    }
+
+    &log("\nStarting Tor ($found_tor) in the background (wanted by $want_tor components).\n");
+    my $pid = fork;
+    if (!defined $pid) {
+	# failed
+	&log("Failed to start $found_tor: $!\n");
+	return;
+    } elsif ($pid > 0) {
+	# parent
+	sleep 2; # wait a few seconds for Tor to start
+
+	# test that it is running
+	if (!kill 0, $pid) {
+	    &log("Tor doesn't seem to be running on pid $pid anymore, ignoring Tor option.\n");
+	} else {
+	    &log("Tor appears to have successfully started (pid $pid).\n");
+	    $plugin_data->{tor_address} = "127.0.0.1:9051";
+	    $plugin_data->{tor_pid} = $pid;
+	}
+    } else {
+	# child
+	exec $found_tor,"SocksListenAddress","127.0.0.1:9051","MaxCircuitDirtiness","30","DataDirectory",$tordir;
+	exit(1); # we won't reach this
+    }
+}
+
+
+sub stop_tor
+{
+    if (defined $plugin_data->{tor_pid}) {
+	# INTR sig stops tor
+	kill 2,$plugin_data->{tor_pid};
+    }
+}
+
+sub test_tor
+{
+	&start_tor;
+	return if (!defined $plugin_data->{tor_pid});	# no components require it
+
+	&log("\nSome components want to use Tor.\n".
+	     "Testing that it is working by connecting to www.google.com via Tor...\n\n");
+
+	sleep 10;
+
+	use LWP::Protocol::http;
+	my $orig_new_socket = \&LWP::Protocol::http::_new_socket;
+
+	# override LWP::Protocol::http's _new_socket method with our own
+	local($^W) = 0;
+	*LWP::Protocol::http::_new_socket = \&socks_new_socket;
+
+	# test that it works
+	my $retries = 0;
+	my $data;
+	while ($retries < 10) {
+		$retries++;
+		&log("Connecting to www.google.com (try $retries) ... ");
+		$data = &fetch_file("http://www.google.com/");
+		last if (($data) && ($data =~ /Google/i));
+
+		sleep 10;
+	}
+
+	if (($data) && ($data =~ /Google/i)) {
+		&log("\nSUCCESS.\nTor appears to be working!\n");
+	} else {
+		&log("Tor doesn't appear to be working. Suggest you look into this!\n");
+	}
+
+	*LWP::Protocol::http::_new_socket = $orig_new_socket;
+	&stop_tor;
+
+	sleep 2;
+}
+
+##############################################################################
+# our own SOCKS4Aified version of LWP::Protocol::http::_new_socket
+
+sub socks_new_socket
+{
+	my($self, $host, $port, $timeout) = @_;
+
+	my ($socks_ip,$socks_port) = split(/:/,$plugin_data->{tor_address});
+
+	local($^W) = 0;  # IO::Socket::INET can be noisy
+	my $sock = $self->socket_class->new(
+		PeerAddr => $socks_ip,
+		PeerPort => $socks_port,
+		Proto    => 'tcp');
+
+	unless ($sock) {
+		# IO::Socket::INET leaves additional error messages in $@
+		$@ =~ s/^.*?: //;
+		&log("Can't connect to $host:$port ($@)\n");
+		return undef;
+	}
+
+	# perl 5.005's IO::Socket does not have the blocking method.
+	eval { $sock->blocking(0); };
+
+	# establish connectivity with socks server - SOCKS4A protocol
+	print { $sock } pack("CCnN", 0x04, 0x01, $port, 1) .
+		(pack 'x') .
+		$host . (pack 'x');
+
+	my $received = "";
+	my $timeout_time = time + $timeout;
+	while ($sock->sysread($received, 8) && (length($received) < 8) ) {
+		select(undef, undef, undef, 0.25);
+		last if ($timeout_time < time);
+	}
+
+	if ($timeout_time < time) {
+		&log("Timeout ($timeout) while connecting via SOCKS server\n");
+		return $sock;
+	}
+
+	my ($null_byte, $req_status, $port_num, $ip_addr) = unpack('CCnN',$received);
+	&log("Connection via SOCKS4A server rejected or failed\n") if ($req_status == 0x5b);
+	&log("Connection via SOCKS4A server because client is not running identd\n") if ($req_status == 0x5c);
+	&log("Connection via SOCKS4A server because client's identd could not confirm the user\n") if ($req_status == 0x5d);
+
+	$sock;
+}
+
+##############################################################################
+
+# For self-locking
+__DATA__
+
