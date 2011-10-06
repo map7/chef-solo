@@ -19,7 +19,7 @@ if ! test -f "$chef_binary"; then
          --force-yes -fuy dist-upgrade
 
      # Install RVM as root (System-wide install)
-     aptitude install -y curl git-core bzip2 build-essential zlib1g-dev libssl-dev
+     apt-get install -y curl git-core bzip2 build-essential zlib1g-dev libssl-dev
 
      # Note system-wide installs are not in the RVM main version
      # bash < <(curl -s https://rvm.beginrescueend.com/install/rvm)
