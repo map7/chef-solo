@@ -1,0 +1,134 @@
+#!/usr/bin/env ruby
+#
+# Use to find duplicate files
+# 
+
+
+require 'find'
+
+@files = {}
+type = ARGV[0]
+
+size_to_mb = lambda { |x| x = x / 1024 / 1024 }
+size_to_gb = lambda { |x| x = x / 1024 / 1024 / 1024 }
+size_to_str = lambda { |x| size_to_mb.call(x) < 1024 ? "#{size_to_mb.call(x)}mb" : "#{size_to_gb.call(x)}gb" }
+
+def check_type(path,type)
+
+	# Check the type
+	if File.extname(path) == ".#{type}"
+		basename = File.basename(path)
+
+		unless File.symlink?(path) or File.dirname(path) =~ /sql/
+			# Check if it already exists in the array?
+			if @files.include?(basename)
+				# Get the array of paths and adds the current found path
+				paths = @files[basename]
+				paths.push(path)
+			else
+				# Add the current path to the files hash
+				@files.merge!(basename => [path])
+			end
+		end
+	end
+end
+
+if type.nil?
+	puts "finddups help
+	Find duplicate files based purely on the filename.
+
+	It's best to run this from the root directory.
+
+	DO NOT RUN THIS AS ROOT OR SUDO
+
+	Example:
+	finddups 4gl
+
+	Scan for video files
+	finddups -v
+
+	Scan for music files
+	finddups -m
+	"
+	exit
+end
+
+case type
+	when '-v'
+		types = %w[m4v avi mpg mp4 mkv div]
+		puts "\n\nSearching for video types: #{types.join(',')}..."
+	when '-m'
+		types = %w[ogg wav mp3 flac]
+		puts "\n\nSearching for music types: #{types.join(',')}..."
+
+	else
+		puts "\n\nSearching for #{type}..."
+end
+
+
+dups = []
+
+Find.find('/') do |path|
+	if types.nil?
+		check_type(path,type)
+	else
+		types.each do |type|
+			check_type(path,type)
+		end
+	end
+end
+
+# Go through all the files hash and print any which have more than 1 path
+duplicates = 0
+total_size = 0
+
+puts "Do you want to be able to delete the duplicate once found? [n]"
+a=$stdin.gets.chomp
+a =~ /[yY]/ ? del=true : del=false
+
+@files.each { |key, value|
+	del_already=false
+
+	if value.size > 1
+		duplicates += 1
+		puts "\n#{key}"
+		puts "\tSize\tByte Size\tDate\t\t\tPath"
+
+		value.each do|path|
+			# Get date
+			date = File.ctime(path)
+			date = date.strftime("%H:%M %d/%m/%Y")
+
+			# Get size
+			size = File.size(path)
+			total_size = total_size + size
+			
+			puts "\t#{size_to_str.call(size)}\t#{size}\t#{date}\t#{path}"
+		end
+
+		puts
+		value.each do|path|
+			if del_already
+				del_already=false
+			else
+				if del
+					puts "Delete #{path}? [n]"
+					a=$stdin.gets.chomp
+					if a=~/[yY]/
+						File.delete(path) 
+						del_already=true
+					end
+				end	
+			end
+		end
+	end
+}
+
+puts "\nTotals"
+puts "Duplicates: #{duplicates}"
+puts "Size:       #{size_to_str.call(total_size)}"
+
+if duplicates == 0
+	puts "\nNo duplicates found!\n\n"
+end
+
