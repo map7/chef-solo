@@ -1,71 +1,29 @@
-# --- Install packages we need ---
+# --- Install system tools
 package 'sysstat'
 package 'htop'
 package 'screen'
 package 'apt-file'
 
-# # --- Install Rails
-# gem_package "rails" do
-#   action :install
-# end
+package 'vim'
+package 'zsh'
+package 'fsarchiver'
 
-# # --- Setup Apache2
-# # The passenger-apache cookbook has compiled the library all you need to do is 
-# # include the lines in your httpd.conf file.
-# # 
-# # Your rails app should be put into /var/www/<your app>
-# file "/etc/apache2/mods-enabled/phusion.load" do
-#   owner "root"
-#   group "root"
-#   mode "0644"
-#   action :create
-#   content "
-# LoadModule passenger_module /usr/local/rvm/gems/ruby-1.9.2-p290/gems/passenger-3.0.7/ext/apache2/mod_passenger.so
-# PassengerRoot /usr/local/rvm/gems/ruby-1.9.2-p290/gems/passenger-3.0.7
-# PassengerRuby /usr/local/rvm/wrappers/ruby-1.9.2-p290/ruby
-# "
-# end
+# --- GUI tools
+package 'xclip'
+package 'gkrellm'
+package 'gparted'
+package 'gnome-do'
 
-# file "/etc/apache2/sites-enabled/000-default" do
-#   action :delete
-# end
+# Install remote control packages
+package 'irda-utils'
+package 'xmacro'
 
-# file "/etc/apache2/sites-enabled/rails_project" do
-#   owner "root"
-#   group "root"
-#   mode "0644"
-#   action :create
-#   content "
-# #  <VirtualHost *:80>
-# #     ServerName localhost / domain
-# #     DocumentRoot /var/www/<app>/public    # <-- be sure to point to 'public'!
-# #     <Directory /var/www/<app>/public>
-# #        AllowOverride all              # <-- relax Apache security settings
-# #        Options -MultiViews            # <-- MultiViews must be turned off
-# #     </Directory>
-# #  </VirtualHost>
-# "
-# end
-
-# # Setup permissions on deployment area.
-# execute "Add #{node[:dbuser]} to group www-data" do
-#   command "usermod -a -G www-data #{node[:dbuser]}"
-# end
-
-# execute "Change group on /var/www" do 
-#   command "chown -R root:www-data /var/www"
-# end
-
-# execute "Change permissions on /var/www" do
-#   command "chmod -R 775 /var/www"
-# end
-
-# # Setup gem sources
-# execute "Add gem sources" do
-#   command "gem sources -a http://gems.github.com"
-#   not_if "gem sources -l | grep http://gems.github.com"
-# end
-
+# Shepherd requirements
+%w[xmltv libxml-simple-perl libalgorithm-diff-perl libgetopt-mixed-perl libcompress-zlib-perl libdata-dumper-simple-perl libdate-manip-perl liblist-compare-perl libdatetime-format-strptime-perl libhtml-parser-perl libxml-dom-perl libgd-gd2-perl libdigest-sha1-perl libarchive-zip-perl libio-string-perl libdbi-perl].each do |pkg|
+  package pkg do
+    action :install
+  end
+end
 
 # # Setup postgres user
 # # sudo -u postgres createuser -sw map7
