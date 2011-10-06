@@ -1,10 +1,10 @@
 {
-	"dbuser": "map7",
+	"dbuser": "vps",
 	"dbpass": "mypasswd",
 	"run_list": [ 
 		"role[web_server]",
 		"recipe[sqlite]",
 		"recipe[postgresql::server]",
-		"recipe[pais::default]"
+		"recipe[pope::default]"
 	]
 }
