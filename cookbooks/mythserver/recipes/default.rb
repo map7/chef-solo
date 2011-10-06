@@ -32,6 +32,12 @@ cookbook_file "#{ENV['HOME']}/.lirc/mythtv" do
   mode "0644"
 end
 
+cookbook_file "#{ENV['HOME']}/.lirc/irexec" do
+  source "irexec"
+  backup 2
+  mode "0644"
+end
+
 # Shepherd requirements
 %w[xmltv libxml-simple-perl libalgorithm-diff-perl libgetopt-mixed-perl libcompress-zlib-perl libdata-dumper-simple-perl libdate-manip-perl liblist-compare-perl libdatetime-format-strptime-perl libhtml-parser-perl libxml-dom-perl libgd-gd2-perl libdigest-sha1-perl libarchive-zip-perl libio-string-perl libdbi-perl].each do |pkg|
   package pkg do
