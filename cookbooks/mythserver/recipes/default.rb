@@ -102,3 +102,21 @@ cookbook_file "#{home}/bin/shepherd" do
   group user  
 end
 
+# Upgrade mythtv to the latest 0.24.x stable
+cookbook_file "/etc/apt/sources.list.d/mythbuntu-repos.list" do
+  source "config/mythbuntu-repos.list"
+  backup 2
+  mode "644"
+  owner "root"
+  group "root"
+end
+
+script "Update pacakges" do
+  interpreter "bash"
+  code <<-EOH
+  apt-get update -o Acquire::http::No-Cache=True
+  apt-get -o Dpkg::Options::="--force-confnew" \
+          --force-yes -fuy dist-upgrade
+  EOH
+end
+
