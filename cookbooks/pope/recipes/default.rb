@@ -39,23 +39,22 @@ file "/etc/apache2/sites-enabled/rails_project" do
   mode "0644"
   action :create
   content "
-# Link your app from /srv/<app>/public to /var/www/<app>
-# EG: ln -s /srv/pub.co/current/public /var/www/pub.co
-# This allows us to have multiple apps on the one server.
 #
 # Single project
 #
 # <VirtualHost *:80>
 #    ServerName localhost / domain
-#    DocumentRoot /var/www/<app>    # <-- be sure to point to 'public'!
-#    <Directory /var/www/<app>>
+#    DocumentRoot /srv/<app>    # <-- be sure to point to 'public'!
+#    <Directory /srv/<app>>
 #       AllowOverride all              # <-- relax Apache security settings
 #       Options -MultiViews            # <-- MultiViews must be turned off
 #    </Directory>
 # </VirtualHost>
 #
-# Multiple projects (Not each directory under /var/www should be a link to the
-# public directory of the project in /srv/<app>/current/public.
+# Multiple projects 
+#
+# Link your app from /srv/<app>/current/public to /var/www/<app>
+# EG: ln -s /srv/pub.co/current/public /var/www/pub.co
 #
 # <VirtualHost *:80>
 #         ServerName localhost
