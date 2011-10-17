@@ -15,7 +15,7 @@ if [ -z "$host" ]; then
 fi
 
 if [ -z "$json" ]; then
-    json="solo.json"
+    json="webserver.json"
 fi
 
 # The host key might change when we instantiate a new VM, so

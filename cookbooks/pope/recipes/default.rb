@@ -16,7 +16,7 @@ end
 # The passenger-apache cookbook has compiled the library all you need to do is 
 # include the lines in your httpd.conf file.
 # 
-# Your rails app should be put into /var/www/<your app>
+# Your rails app should be put into /srv/<your app> and be linked into /var/www
 file "/etc/apache2/mods-enabled/phusion.load" do
   owner "root"
   group "root"
@@ -39,14 +39,31 @@ file "/etc/apache2/sites-enabled/rails_project" do
   mode "0644"
   action :create
   content "
-#  <VirtualHost *:80>
-#     ServerName localhost / domain
-#     DocumentRoot /var/www/<app>/public    # <-- be sure to point to 'public'!
-#     <Directory /var/www/<app>/public>
-#        AllowOverride all              # <-- relax Apache security settings
-#        Options -MultiViews            # <-- MultiViews must be turned off
-#     </Directory>
-#  </VirtualHost>
+#
+# Single project
+#
+# <VirtualHost *:80>
+#    ServerName localhost / domain
+#    DocumentRoot /srv/<app>    # <-- be sure to point to 'public'!
+#    <Directory /srv/<app>>
+#       AllowOverride all              # <-- relax Apache security settings
+#       Options -MultiViews            # <-- MultiViews must be turned off
+#    </Directory>
+# </VirtualHost>
+#
+# Multiple projects 
+#
+# Link your app from /srv/<app>/current/public to /var/www/<app>
+# EG: ln -s /srv/pub.co/current/public /var/www/pub.co
+#
+# <VirtualHost *:80>
+#         ServerName localhost
+#         DocumentRoot /var/www
+#         RailsBaseURI /<app1>
+#         RailsBaseURI /<app2>
+#         RailsBaseURI /<app3>
+# </VirtualHost>
+
 "
 end
 
@@ -55,12 +72,12 @@ execute "Add #{node[:dbuser]} to group www-data" do
   command "usermod -a -G www-data #{node[:dbuser]}"
 end
 
-execute "Change group on /var/www" do 
-  command "chown -R root:www-data /var/www"
+execute "Change group on /srv" do 
+  command "chown -R root:www-data /srv"
 end
 
-execute "Change permissions on /var/www" do
-  command "chmod -R 775 /var/www"
+execute "Change permissions on /srv" do
+  command "chmod -R 775 /srv"
 end
 
 # Setup gem sources

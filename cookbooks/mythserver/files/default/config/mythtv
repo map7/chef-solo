@@ -1,0 +1,286 @@
+# lircrc.mceusb
+
+###################
+#
+#  MythTV
+#
+###################
+begin
+    prog = mythtv
+    button = One
+    config = 1
+end
+
+begin
+    prog = mythtv
+    button = Two
+    config = 2
+end
+
+begin
+    prog = mythtv
+    button = Three
+    config = 3
+end
+
+begin
+    prog = mythtv
+    button = Four
+    config = 4
+end
+
+begin
+    prog = mythtv
+    button = Five
+    config = 5
+end
+
+begin
+    prog = mythtv
+    button = Six
+    config = 6
+end
+
+begin
+    prog = mythtv
+    button = Seven
+    config = 7
+end
+
+begin
+    prog = mythtv
+    button = Eight
+    config = 8
+end
+
+begin
+    prog = mythtv
+    button = Nine
+    config = 9
+end
+
+begin
+    prog = mythtv
+    button = Zero
+    config = 0
+end
+
+# Replaced by xmacro 
+#begin
+#    prog = mythtv
+#    button = Back
+#    config = Esc
+#end
+
+begin
+    prog = mythtv
+    button = Home
+    config = Esc
+end
+
+begin
+    prog = mythtv
+    button = More
+    config = I
+end
+
+begin
+    prog = mythtv
+    button = VolDown
+    repeat = 1
+    config = F10
+end
+
+begin
+    prog = mythtv
+    button = VolUp
+    repeat = 1
+    config = F11
+end
+
+begin
+    prog = mythtv
+    button = ChanUp
+    repeat = 3
+    config = Up
+end
+
+begin
+    prog = mythtv
+    button = ChanDown
+    repeat = 3
+    config = Down
+end
+
+begin
+    prog = mythtv
+    button = Up
+    repeat = 3
+    config = Up
+end
+
+begin
+    prog = mythtv
+    button = Down
+    repeat = 3
+    config = Down
+end
+
+begin
+    prog = mythtv
+    button = Left
+    repeat = 3
+    config = Left
+end
+
+begin
+    prog = mythtv
+    button = Right
+    repeat = 3
+    config = Right
+end
+
+begin
+    prog = mythtv
+    button = Play
+    config = Return
+end
+
+begin
+    prog = mythtv
+    button = OK
+    config = Return
+end
+
+begin
+    prog = mythtv
+    button = Enter
+    config = Return
+end
+
+begin
+    prog = mythtv
+    button = Mute
+    config = |
+end
+
+begin
+    prog = mythtv
+    button = Rewind
+    config = PgUp
+end
+
+begin
+    prog = mythtv
+    button = Forward
+    config = PgDown
+end
+
+begin
+  prog = mythtv
+  button = Record
+  config = R
+end
+
+begin
+   prog = mythtv
+   button = Stop
+   config = ESC
+end
+
+begin
+    prog = mythtv
+    button = Pause
+    config = P
+end
+
+# Use for backwards commercial skip
+begin
+   prog = mythtv
+   button = Replay
+   config = Q
+end
+
+# Use for forward commercial skip
+begin
+   prog = mythtv
+   button = Skip
+   config = Z
+end
+
+# Toggle subtitles (closed captions)
+begin
+   prog = mythtv
+   button = Teletext
+   config = T   
+end
+
+begin
+   prog = mythtv
+   button = Green
+   config = e, z
+end
+
+begin
+   prog = mythtv
+   button = Yellow
+   config = m   
+end
+
+
+begin
+   prog = mythtv
+   button = Blue
+   config = W   
+end
+
+
+
+
+# Special Jump Buttons
+begin
+   prog = mythtv
+   button = LiveTV
+   config = ALT+L
+end
+
+# RecordedTV button = Jump to TV Recording Playback section.
+# Config button defined via MythWeb's KeyBindings JumpPoints editor.
+begin
+    prog = mythtv
+    button = RecTV
+    config = Ctrl+r
+end
+
+
+# Guide = Show EPG while in TV mode.
+begin
+    prog = mythtv
+    button = Guide
+    config = Alt+g
+end
+
+# DVDMenu = Bring up OSD & playlist menus.
+begin
+    prog = mythtv
+    button = DVD
+    config = Ctrl+d
+end
+
+
+
+# Start Mythtv
+#begin
+#   prog = irexec
+#   button = Red
+#   config = myth_start.sh
+#end
+
+# Amplifier Buttons
+# Power will change the AV source
+begin
+   prog = irexec
+   button = Power
+   config = myth_equipment.sh
+end
+
