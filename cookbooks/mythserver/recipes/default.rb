@@ -13,12 +13,15 @@ package 'sysstat'
 package 'htop'
 package 'screen'
 package 'apt-file'
+package 'numlockx'
 
 package 'vim'
 package 'zsh'
 package 'fsarchiver'
+package 'pbzip2'
 
 # GUI tools
+package 'catfish'
 package 'xclip'
 package 'gkrellm'
 package 'gparted'
@@ -26,6 +29,9 @@ package 'gnome-do'
 
 # TV card firmware
 package 'linux-firmware-nonfree'
+
+# Mythtv
+package 'mythtv-status'
 
 # Install remote control packages
 package 'irda-utils'
