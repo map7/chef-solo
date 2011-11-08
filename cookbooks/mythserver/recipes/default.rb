@@ -26,6 +26,7 @@ package 'xclip'
 package 'gkrellm'
 package 'gparted'
 package 'gnome-do'
+package 'vuze'
 
 # TV card firmware
 package 'linux-firmware-nonfree'
@@ -126,3 +127,29 @@ script "Update pacakges" do
   EOH
 end
 
+# Samba
+package "smbfs"
+package "system-config-samba"
+
+# MythTV plugins
+package "mythvideo"
+package "mythgallery"
+package "mythweather"
+package "mythgame"
+package "mythnews"
+package "mythnetvision"
+package "mythbrowser"
+package "mytharchive"
+
+# Mythmusic setup
+package "mythmusic"
+package "libvisual-projectm"
+
+# Mythtv fuse filesystem (Makes recordings show their names in file manager)
+package "mythtvfs"
+
+# Games
+
+# Megadrive
+package "dgen"
+package "libsdl1.2-dev"
