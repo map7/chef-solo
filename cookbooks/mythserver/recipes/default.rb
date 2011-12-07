@@ -122,8 +122,7 @@ script "Update pacakges" do
   interpreter "bash"
   code <<-EOH
   apt-get update -o Acquire::http::No-Cache=True
-  apt-get -o Dpkg::Options::="--force-confnew" \
-          --force-yes -fuy dist-upgrade
+  apt-get -o Dpkg::Options::="--force-confnew" --force-yes -fuy dist-upgrade
   EOH
 end
 

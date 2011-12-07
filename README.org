@@ -6,10 +6,34 @@
    Blank Ubuntu 10.04 server machine with passwordless SSH access and
    passwordless sudo for your user.
 
+1. Passwordless ssh
+: ssh-copy-id <user>@<host>
+
+2. Configure your user for passwordless sudo by adding to your /etc/sudoers file:
+: <user> ALL=(ALL) NOPASSWD: ALL
+
+
+
 ** Running
-   ./deploy <user>@<host> <json>
+: ./deploy.sh <user>@<host> <json>
 
    json - This is optional. I've put this there so you can have different server
    setup config files. eg: web_server.json
    
-  
+** Mythtv server requirements
+   
+Setup your server using the mythbuntu 11.04 or higher distro.
+
+During the install
+ - Select to download codecs etc
+ - Setup drives like so:
+| mount point              | type | size |
+| /                        | ext4 | 20GB |
+| /home                    | ext4 | 30GB |
+| /var/lib/mythtv/overlays | ext4 | 10GB |
+| /var/lib/mythtv          | xfs  | *    |
+ - Select all services
+ - Setup as a frontend & backend.
+ - Select your remote control
+
+: ./deploy.sh <user>@<host> mythtv.json
