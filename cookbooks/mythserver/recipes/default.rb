@@ -13,7 +13,6 @@ package 'sysstat'
 package 'htop'
 package 'screen'
 package 'apt-file'
-package 'numlockx'
 
 package 'vim'
 package 'zsh'
@@ -26,7 +25,22 @@ package 'xclip'
 package 'gkrellm'
 package 'gparted'
 package 'gnome-do'
-package 'vuze'
+package 'ktorrent'
+
+# numlockx
+package 'numlockx'
+
+# directory "#{home}/.config/autostart" do
+#   recursive true  
+# end
+
+cookbook_file "#{home}/.config/autostart" do
+  source "autostart/numlockx.desktop"
+  mode "0755"
+  owner user
+  group user
+end
+
 
 # TV card firmware
 package 'linux-firmware-nonfree'
@@ -129,6 +143,37 @@ end
 # Samba
 package "smbfs"
 package "system-config-samba"
+
+cookbook_file "/etc/samba/smb.conf" do
+  source "config/smb.conf"
+  backup 2
+  mode "0644"
+  owner "root"
+  group "root"
+end
+
+service "samba" do
+  action :restart
+end
+
+# Setup storage mounts
+directory "/storage1" do
+  mode "755"
+  owner user
+  group user
+end
+
+directory "/storage2" do
+  mode "755"
+  owner user
+  group user
+end
+
+directory "/storage3" do
+  mode "755"
+  owner user
+  group user
+end
 
 # MythTV plugins
 package "mythvideo"

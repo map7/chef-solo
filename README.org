@@ -13,7 +13,6 @@
 : <user> ALL=(ALL) NOPASSWD: ALL
 
 
-
 ** Running
 : ./deploy.sh <user>@<host> <json>
 
@@ -37,3 +36,10 @@ During the install
  - Select your remote control
 
 : ./deploy.sh <user>@<host> mythtv.json
+
+
+*** Notes
+
+I typically put my video drives in /storage? (where ? is the number of the drive)
+
+If you want to share a /storage? directory then look at /etc/samba/smb.conf
