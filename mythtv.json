@@ -1,5 +1,6 @@
 {
 	"run_list": [ 
-		"recipe[mythserver::default]"
+		"recipe[mythserver::default]",
+		"recipe[mythserver::ltsp]"
 	]
 }
