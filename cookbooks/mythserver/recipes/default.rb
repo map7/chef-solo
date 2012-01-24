@@ -5,6 +5,11 @@
 # - Using a MCE compatible remote.
 # - Live in Australia (shepherd EPG)
 #
+
+#
+# Add resolv.conf
+# Add packages: handbrake, ncdu, mplayer, rar
+#
 home = ENV['HOME']
 user = ENV['SUDO_USER']
 
@@ -30,11 +35,11 @@ package 'ktorrent'
 # numlockx
 package 'numlockx'
 
-# directory "#{home}/.config/autostart" do
-#   recursive true  
-# end
+directory "#{home}/.config/autostart" do
+  recursive true  
+end
 
-cookbook_file "#{home}/.config/autostart" do
+cookbook_file "#{home}/.config/autostart/numlockx.desktop" do
   source "autostart/numlockx.desktop"
   mode "0755"
   owner user
@@ -132,7 +137,7 @@ cookbook_file "/etc/apt/sources.list.d/mythbuntu-repos.list" do
   group "root"
 end
 
-script "Update pacakges" do
+script "Update packages" do
   interpreter "bash"
   code <<-EOH
   apt-get update -o Acquire::http::No-Cache=True
@@ -152,7 +157,7 @@ cookbook_file "/etc/samba/smb.conf" do
   group "root"
 end
 
-service "samba" do
+service "smbd" do
   action :restart
 end
 
@@ -176,17 +181,35 @@ directory "/storage3" do
 end
 
 # MythTV plugins
-package "mythvideo"
-package "mythgallery"
-package "mythweather"
-package "mythgame"
-package "mythnews"
-package "mythnetvision"
-package "mythbrowser"
-package "mytharchive"
+package "mythvideo" do
+  options "--force-yes -y"
+end
+package "mythgallery" do
+  options "--force-yes -y"
+end
+package "mythweather" do
+  options "--force-yes -y"
+end
+package "mythgame" do
+  options "--force-yes -y"
+end
+package "mythnews" do
+  options "--force-yes -y"
+end
+package "mythnetvision" do
+  options "--force-yes -y"
+end
+package "mythbrowser" do
+  options "--force-yes -y"
+end
+package "mytharchive" do
+  options "--force-yes -y"
+end
 
 # Mythmusic setup
-package "mythmusic"
+package "mythmusic" do
+  options "--force-yes -y"
+end
 package "libvisual-projectm"
 
 # Mythtv fuse filesystem (Makes recordings show their names in file manager)
