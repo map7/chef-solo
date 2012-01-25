@@ -23,6 +23,7 @@ package 'vim'
 package 'zsh'
 package 'fsarchiver'
 package 'pbzip2'
+package 'mousepad'   # simple GUI text editor
 
 # GUI tools
 package 'catfish'
@@ -225,3 +226,4 @@ package "libsdl1.2-dev"
 # Install tor for internet anonymity
 # https://www.torproject.org/docs/tor-doc-unix.html.en
 package 'tor'
+
