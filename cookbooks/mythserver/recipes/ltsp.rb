@@ -36,6 +36,7 @@ package 'mythbuntu-diskless-server'
 execute "Create diskless image" do
   command 'ltsp-build-client --mythbuntu --mythbuntu-user-credentials "mythclient":"mythclient" --copy-package-lists --copy-sourceslist --accept-unsigned-packages --arch i386'
   action :run
+  not_if {File.exists?("/opt/ltsp/i386")}
 end
 
 # Add ltsp_chroot
