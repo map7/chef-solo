@@ -73,6 +73,13 @@ end
 #end
 
 begin
+	prog = irexec
+	button = Back
+	repeat = 0
+	config = xmacroplay-keys :0 Escape
+end
+
+begin
     prog = mythtv
     button = Home
     config = Esc
