@@ -46,7 +46,6 @@ cookbook_file "#{home}/.config/autostart/numlockx.desktop" do
   group user
 end
 
-
 # TV card firmware
 package 'linux-firmware-nonfree'
 
@@ -92,6 +91,17 @@ directory "#{home}/bin" do
   action :create
 end
 
+# Copy shepherd
+cookbook_file "#{home}/bin/shepherd" do
+  source "scripts/shepherd"
+  backup 2
+  mode "0755"
+  owner user
+  group user  
+end
+
+# Custom scripts
+
 # Copy find duplicates script across.
 cookbook_file "#{home}/bin/finddups" do
   source "scripts/finddups"
@@ -113,15 +123,6 @@ end
 # My restart mythfrontend script
 cookbook_file "#{home}/bin/myth_start" do
   source "scripts/myth_start"
-  backup 2
-  mode "0755"
-  owner user
-  group user  
-end
-
-# Copy shepherd
-cookbook_file "#{home}/bin/shepherd" do
-  source "scripts/shepherd"
   backup 2
   mode "0755"
   owner user
@@ -220,3 +221,7 @@ package "mythtvfs"
 # Megadrive
 package "dgen"
 package "libsdl1.2-dev"
+
+# Install tor for internet anonymity
+# https://www.torproject.org/docs/tor-doc-unix.html.en
+package 'tor'
