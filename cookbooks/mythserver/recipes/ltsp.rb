@@ -8,26 +8,30 @@ package 'dhcp3-server'
 package 'tftp'
 
 # Copy diskless readme
-cookbook_file "/home/mythserver/Desktop/diskless_readme.txt" do
+cookbook_file "/home/#{user}/Desktop/diskless_readme.txt" do
   source "diskless_readme.txt"
-  owner "mythserver"
-  group "mythserver"
+  owner user
+  group user
 end
 
 # Static IP settings
 cookbook_file "/etc/network/interfaces" do
   source "network/interfaces"
   backup 5
+  mode "0644"
   owner "root"
   group "root"
+  not_if {node[:setup_dhcp] == "no"}
 end
 
 # DHCP settings
 cookbook_file "/etc/dhcp/dhcpd.conf" do
   source "dhcp/dhcpd.conf"
   backup 5
+  mode "0755"
   owner "root"
   group "root"
+  not_if {node[:setup_dhcp] == "no"}
 end
 
 # Install diskess server
@@ -46,4 +50,17 @@ cookbook_file "#{home}/bin/ltsp_chroot" do
   mode "0755"
   owner user
   group user  
+end
+
+# Add overlay to exports
+cookbook_file "/etc/exports" do
+  source "network/exports"
+  backup 2
+  mode "0644"
+  owner "root"
+  group "root"
+end
+
+service "nfs-kernel-server" do
+  action :restart
 end

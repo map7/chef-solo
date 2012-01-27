@@ -18,6 +18,7 @@ package 'sysstat'
 package 'htop'
 package 'screen'
 package 'apt-file'
+package 'nethogs'
 
 package 'vim'
 package 'zsh'
