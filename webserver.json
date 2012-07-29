@@ -1,6 +1,9 @@
 {
 	"dbuser": "vps",
 	"dbpass": "mypasswd",
+	
+	"postgresql":{"password":{"postgres":"password"}},
+
 	"run_list": [ 
 		"role[web_server]",
 		"recipe[sqlite]",

@@ -17,10 +17,10 @@
 # limitations under the License.
 #
 
-case node[:platform]
+case node['platform']
 when "debian","ubuntu"
   package "libapache2-mod-wsgi"
-when "redhat","centos","fedora", "arch"
+when "redhat", "centos", "scientific", "fedora", "arch", "amazon"
   package "mod_wsgi"
 end
 

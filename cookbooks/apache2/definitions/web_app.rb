@@ -17,7 +17,7 @@
 # limitations under the License.
 #
 
-define :web_app, :template => "web_app.conf.erb" do
+define :web_app, :template => "web_app.conf.erb", :enable => true do
   
   application_name = params[:name]
 
@@ -26,10 +26,10 @@ define :web_app, :template => "web_app.conf.erb" do
   include_recipe "apache2::mod_deflate"
   include_recipe "apache2::mod_headers"
   
-  template "#{node[:apache][:dir]}/sites-available/#{application_name}.conf" do
+  template "#{node['apache']['dir']}/sites-available/#{application_name}.conf" do
     source params[:template]
     owner "root"
-    group "root"
+    group node['apache']['root_group']
     mode 0644
     if params[:cookbook]
       cookbook params[:cookbook]
@@ -38,12 +38,12 @@ define :web_app, :template => "web_app.conf.erb" do
       :application_name => application_name,
       :params => params
     )
-    if ::File.exists?("#{node[:apache][:dir]}/sites-enabled/#{application_name}.conf")
+    if ::File.exists?("#{node['apache']['dir']}/sites-enabled/#{application_name}.conf")
       notifies :reload, resources(:service => "apache2"), :delayed
     end
   end
   
   apache_site "#{params[:name]}.conf" do
-    enable enable_setting
+    enable params[:enable]
   end
 end

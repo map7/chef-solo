@@ -6,6 +6,8 @@ package 'sysstat'
 package 'htop'
 package 'screen'
 package 'apt-file'
+package 'command-not-found'
+package 'nodejs'
 
 # --- Install Rails
 gem_package "rails" do
@@ -23,9 +25,9 @@ file "/etc/apache2/mods-enabled/phusion.load" do
   mode "0644"
   action :create
   content "
-LoadModule passenger_module /usr/local/rvm/gems/ruby-1.9.2-p290/gems/passenger-3.0.7/ext/apache2/mod_passenger.so
-PassengerRoot /usr/local/rvm/gems/ruby-1.9.2-p290/gems/passenger-3.0.7
-PassengerRuby /usr/local/rvm/wrappers/ruby-1.9.2-p290/ruby
+LoadModule passenger_module /usr/local/lib/ruby/gems/1.9.1/gems/passenger-3.0.7/ext/apache2/mod_passenger.so
+PassengerRoot /usr/local/lib/ruby/gems/1.9.1/gems/passenger-3.0.7
+PassengerRuby /usr/local/bin/ruby
 "
 end
 
@@ -81,10 +83,10 @@ execute "Change permissions on /srv" do
 end
 
 # Setup gem sources
-execute "Add gem sources" do
-  command "gem sources -a http://gems.github.com"
-  not_if "gem sources -l | grep http://gems.github.com"
-end
+# execute "Add gem sources" do
+#   command "gem sources -a http://gems.github.com"
+#   not_if "gem sources -l | grep http://gems.github.com"
+# end
 
 
 # Setup postgres user
@@ -103,7 +105,7 @@ end
 package 'sphinxsearch'
 
 execute "Copy sphinx config file" do
-  command "cp /etc/sphinxsearch/sphinx.conf.dist /etc/sphinxsearch/sphinx.conf"
+  command "cp /etc/sphinxsearch/sphinx.conf.sample /etc/sphinxsearch/sphinx.conf"
   not_if do
     File.exists?("/etc/sphinxsearch/sphinx.conf")
   end
@@ -114,16 +116,14 @@ package 'libxslt1-dev'
 package 'libxml2-dev'
 
 # Install ruby-debug
-# This has to be install like this if you run RVM system wide.
-execute "Install ruby-debug19" do 
-  command "gem install ruby-debug19 -- --with-ruby-include=$rvm_path/src/$(rvm tools strings)"
-  not_if "gem list | grep ruby-debug19"
-end
+# gem_package "ruby-debug19" do
+#   action :install
+# end
 
 # Install readline
-execute "Install readline" do
-  command "cd $rvm_path/src/$(rvm tools strings)/ext/readline;sudo ruby extconf.rb; sudo make; sudo make install"
-end
+# execute "Install readline" do
+#   command "cd $rvm_path/src/$(rvm tools strings)/ext/readline;sudo ruby extconf.rb; sudo make; sudo make install"
+# end
 
 # RefineryCMS requirements
 package "imagemagick"

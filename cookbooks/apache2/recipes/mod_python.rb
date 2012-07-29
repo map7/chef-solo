@@ -17,12 +17,12 @@
 # limitations under the License.
 #
 
-case node[:platform]
+case node['platform']
   when "debian", "ubuntu"
     package "libapache2-mod-python" do
       action :install
     end
-  when "centos", "redhat", "fedora"
+  when "redhat", "centos", "scientific", "fedora", "amazon"
     package "mod_python" do
       action :install
       notifies :run, resources(:execute => "generate-module-list"), :immediately

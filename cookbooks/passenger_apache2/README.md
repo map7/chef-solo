@@ -3,16 +3,6 @@ Description
 
 Installs passenger for Apache 2.
 
-Changes
-====
-
-## v0.99.0:
-
-* Upgrade to passenger 3.0.7
-* Attributes are all "default"
-* Install curl development headers
-* Move PassengerMaxPoolSize to config of module instead of vhost.
-
 Requirements
 ====
 
