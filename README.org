@@ -1,6 +1,6 @@
 * Chef-solo
   Bootstrapping files for creating a Ruby on Rails server on an 
-  Ubuntu 12.04 LTS machine
+  Tested on Ubuntu 12.04 server, with Ruby on Rails 3.2.7 and Ruby 1.9.3-p125
 
 ** Requirements
    Blank Ubuntu 12.04 server machine with passwordless SSH access and
