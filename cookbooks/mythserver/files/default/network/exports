@@ -1,0 +1,5 @@
+/var/lib/mythtv/recordings    *(ro,async,no_root_squash,no_subtree_check)
+/var/lib/mythtv/videos    *(ro,async,no_root_squash,no_subtree_check)
+/var/lib/mythtv/music    *(ro,async,no_root_squash,no_subtree_check)
+/var/lib/mythtv/pictures    *(ro,async,no_root_squash,no_subtree_check)
+/var/cache/mythbuntu-diskless/overlay/ *(rw,no_root_squash,async,no_subtree_check)

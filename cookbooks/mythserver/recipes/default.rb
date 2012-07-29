@@ -5,6 +5,11 @@
 # - Using a MCE compatible remote.
 # - Live in Australia (shepherd EPG)
 #
+
+#
+# Add resolv.conf
+# Add packages: handbrake, ncdu, mplayer, rar
+#
 home = ENV['HOME']
 user = ENV['SUDO_USER']
 
@@ -13,19 +18,41 @@ package 'sysstat'
 package 'htop'
 package 'screen'
 package 'apt-file'
+package 'nethogs'
 
 package 'vim'
 package 'zsh'
 package 'fsarchiver'
+package 'pbzip2'
+package 'mousepad'   # simple GUI text editor
 
 # GUI tools
+package 'catfish'
 package 'xclip'
 package 'gkrellm'
 package 'gparted'
 package 'gnome-do'
+package 'ktorrent'
+
+# numlockx
+package 'numlockx'
+
+directory "#{home}/.config/autostart" do
+  recursive true  
+end
+
+cookbook_file "#{home}/.config/autostart/numlockx.desktop" do
+  source "autostart/numlockx.desktop"
+  mode "0755"
+  owner user
+  group user
+end
 
 # TV card firmware
 package 'linux-firmware-nonfree'
+
+# Mythtv
+package 'mythtv-status'
 
 # Install remote control packages
 package 'irda-utils'
@@ -66,6 +93,17 @@ directory "#{home}/bin" do
   action :create
 end
 
+# Copy shepherd
+cookbook_file "#{home}/bin/shepherd" do
+  source "scripts/shepherd"
+  backup 2
+  mode "0755"
+  owner user
+  group user  
+end
+
+# Custom scripts
+
 # Copy find duplicates script across.
 cookbook_file "#{home}/bin/finddups" do
   source "scripts/finddups"
@@ -93,15 +131,6 @@ cookbook_file "#{home}/bin/myth_start" do
   group user  
 end
 
-# Copy shepherd
-cookbook_file "#{home}/bin/shepherd" do
-  source "scripts/shepherd"
-  backup 2
-  mode "0755"
-  owner user
-  group user  
-end
-
 # Upgrade mythtv to the latest 0.24.x stable
 cookbook_file "/etc/apt/sources.list.d/mythbuntu-repos.list" do
   source "config/mythbuntu-repos.list"
@@ -111,12 +140,91 @@ cookbook_file "/etc/apt/sources.list.d/mythbuntu-repos.list" do
   group "root"
 end
 
-script "Update pacakges" do
+script "Update packages" do
   interpreter "bash"
   code <<-EOH
   apt-get update -o Acquire::http::No-Cache=True
-  apt-get -o Dpkg::Options::="--force-confnew" \
-          --force-yes -fuy dist-upgrade
+  apt-get -o Dpkg::Options::="--force-confnew" --force-yes -fuy dist-upgrade
   EOH
 end
+
+# Samba
+package "smbfs"
+package "system-config-samba"
+
+cookbook_file "/etc/samba/smb.conf" do
+  source "config/smb.conf"
+  backup 2
+  mode "0644"
+  owner "root"
+  group "root"
+end
+
+service "smbd" do
+  action :restart
+end
+
+# Setup storage mounts
+directory "/storage1" do
+  mode "755"
+  owner user
+  group user
+end
+
+directory "/storage2" do
+  mode "755"
+  owner user
+  group user
+end
+
+directory "/storage3" do
+  mode "755"
+  owner user
+  group user
+end
+
+# MythTV plugins
+package "mythvideo" do
+  options "--force-yes -y"
+end
+package "mythgallery" do
+  options "--force-yes -y"
+end
+package "mythweather" do
+  options "--force-yes -y"
+end
+package "mythgame" do
+  options "--force-yes -y"
+end
+package "mythnews" do
+  options "--force-yes -y"
+end
+package "mythnetvision" do
+  options "--force-yes -y"
+end
+package "mythbrowser" do
+  options "--force-yes -y"
+end
+package "mytharchive" do
+  options "--force-yes -y"
+end
+
+# Mythmusic setup
+package "mythmusic" do
+  options "--force-yes -y"
+end
+package "libvisual-projectm"
+
+# Mythtv fuse filesystem (Makes recordings show their names in file manager)
+package "mythtvfs"
+
+# Games
+
+# Megadrive
+package "dgen"
+package "libsdl1.2-dev"
+
+# Install tor for internet anonymity
+# https://www.torproject.org/docs/tor-doc-unix.html.en
+package 'tor'
 

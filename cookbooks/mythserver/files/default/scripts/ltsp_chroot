@@ -1,0 +1,20 @@
+#!/bin/bash
+
+# Edit to suit
+CHROOT_PATH=/opt/ltsp/i386
+
+sudo mount -o bind /proc ${CHROOT_PATH}/proc
+sudo mount -o bind /dev ${CHROOT_PATH}/dev
+sudo mount -o bind /dev/pts ${CHROOT_PATH}/dev/pts
+sudo mount -o bind /sys ${CHROOT_PATH}/sys
+
+sudo chroot ${CHROOT_PATH} /bin/bash
+
+CHROOT_PID=$!
+wait $CHROOT_PID
+
+echo "Unmounting chroot environment"
+sudo umount $CHROOT_PATH/sys
+sudo umount $CHROOT_PATH/dev/pts
+sudo umount $CHROOT_PATH/dev
+sudo umount $CHROOT_PATH/proc

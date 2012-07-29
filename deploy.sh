@@ -9,7 +9,8 @@ json="${2}"
 
 if [ -z "$host" ]; then
     echo "Usage: ./deploy.sh [user@host] [json]"
-    echo "\nEG: ./deploy.sh fred@192.168.1.1 web_server.json"
+	echo 
+    echo "EG: ./deploy.sh fred@192.168.1.1 web_server.json"
     echo "If no json is given it will default to solo.json"
     exit
 fi
