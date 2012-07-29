@@ -1,17 +1,16 @@
 * Chef-solo
   Bootstrapping files for creating a Ruby on Rails server on an 
-  Ubuntu 10.04 LTS machine
+  Ubuntu 12.04 LTS machine
 
 ** Requirements
-   Blank Ubuntu 10.04 server machine with passwordless SSH access and
+   Blank Ubuntu 12.04 server machine with passwordless SSH access and
    passwordless sudo for your user.
 
 1. Passwordless ssh
 : ssh-copy-id <user>@<host>
 
-2. Configure your user for passwordless sudo by adding to your /etc/sudoers file:
-: <user> ALL=(ALL) NOPASSWD: ALL
-
+2. Configure your user for passwordless sudo by adding to your /etc/sudoers file: (Last line)
+: %admin ALL=NOPASSWD: ALL
 
 ** Running
 : ./deploy.sh <user>@<host> <json>
