@@ -1,6 +1,6 @@
 #
 # Cookbook Name:: apache2
-# Recipe:: python 
+# Recipe:: fastcgi
 #
 # Copyright 2008-2009, Opscode, Inc.
 #
@@ -17,16 +17,10 @@
 # limitations under the License.
 #
 
-case node['platform']
-  when "debian", "ubuntu"
-    package "libapache2-mod-python" do
-      action :install
-    end
-  when "redhat", "centos", "scientific", "fedora", "amazon"
-    package "mod_python" do
-      action :install
-      notifies :run, resources(:execute => "generate-module-list"), :immediately
-    end
-end
+if platform?("debian", "ubuntu")
+  package "libapache2-mod-fastcgi"
 
-apache_module "python"
+  apache_module "fastcgi" do
+    conf true
+  end
+end
