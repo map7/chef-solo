@@ -25,8 +25,8 @@ file "/etc/apache2/mods-enabled/phusion.load" do
   mode "0644"
   action :create
   content "
-LoadModule passenger_module /usr/local/lib/ruby/gems/1.9.1/gems/passenger-3.0.7/ext/apache2/mod_passenger.so
-PassengerRoot /usr/local/lib/ruby/gems/1.9.1/gems/passenger-3.0.7
+LoadModule passenger_module /usr/local/lib/ruby/gems/1.9.1/gems/passenger-3.0.14/ext/apache2/mod_passenger.so
+PassengerRoot /usr/local/lib/ruby/gems/1.9.1/gems/passenger-3.0.14
 PassengerRuby /usr/local/bin/ruby
 "
 end
@@ -41,15 +41,21 @@ file "/etc/apache2/sites-enabled/rails_project" do
   mode "0644"
   action :create
   content "
+
+# Set the size as 2 for 256MB VPS - How many Rack processes to start
+PassengerMaxPoolSize #{node[:passenger][:max_pool_size]}
 #
 # Single project
 #
 # <VirtualHost *:80>
-#    ServerName localhost / domain
-#    DocumentRoot /srv/<app>    # <-- be sure to point to 'public'!
-#    <Directory /srv/<app>>
-#       AllowOverride all              # <-- relax Apache security settings
-#       Options -MultiViews            # <-- MultiViews must be turned off
+#    ServerName www.yourhost.com
+#    # !!! Be sure to point DocumentRoot to 'public'!
+#    DocumentRoot /somewhere/public    
+#    <Directory /somewhere/public>
+#       # This relaxes Apache security settings.
+#       AllowOverride all
+#       # MultiViews must be turned off.
+#       Options -MultiViews
 #    </Directory>
 # </VirtualHost>
 #
@@ -127,3 +133,11 @@ package 'libxml2-dev'
 
 # RefineryCMS requirements
 package "imagemagick"
+
+# Check if passenger_apache2 is working
+# Otherwise run this:
+#
+# execute "passenger_module" do
+#   command 'echo -en "\n\n\n\n" | passenger-install-apache2-module'
+#   creates node[:passenger][:module_path]
+# end
