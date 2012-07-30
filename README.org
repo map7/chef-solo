@@ -17,7 +17,61 @@
 
    json - This is optional. I've put this there so you can have different server
    setup config files. eg: web_server.json
-   
+
+*** After system is built
+
+This part maybe handled by using passenger_apache2.
+
+Installing passenger.
+: sudo passenger-install-apache2-module
+
+Edit /etc/apache2/sites-enabled/rails_project, and follow the example
+
+Restart apache2
+: cap passenger:restart
+
+You may have to restart apache2 on the server
+: sudo service apache2 restart
+
+**** Passenger
+
+Max pool size should be set to '2' for VPS's with 256MB RAM. Default is 6.
+
+**** Capistrano
+[[http://railscasts.com/episodes/133-capistrano-tasks/][Capistrano Railscast]]
+
+The next step after your machine is setup is to setup capistrano for deployment.
+	 
+
+Use capistrano to deploy your app.
+<config deploy.rb>
+
+: cap deploy:setup
+: cap deploy:cold
+: cap deploy:seed
+
+ssh into server and do the following
+: cd /srv/<project>/shared
+: mkdir config
+
+Assuming you have a database.yml.example file you could do 
+: cp /srv/<project>/current/config/database.yml.example /srv/<project>/shared/config/database.yml
+
+Now edit your database.yml file so that it has only the production database details in it.
+
+**** Troubleshooting
+
+***** Passenger: Unexpected end-of-file
+
+If you are getting the following error
+	  
+Passenger encountered the following error:
+The application spawner server exited unexpectedly: Unexpected end-of-file detected. 
+
+Upgrade passenger to 3.0.14 
+: sudo gem update passenger
+: passenger-install-apache2-module
+
 ** Mythtv server requirements
    
 Setup your server using the mythbuntu 11.04 or higher distro.
