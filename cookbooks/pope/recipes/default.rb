@@ -43,6 +43,7 @@ file "/etc/apache2/sites-enabled/rails_project" do
   content "
 
 # Set the size as 2 for 256MB VPS - How many Rack processes to start
+# If you plan on running delayed_job then set this to 1 or up the memory to 512MB.
 PassengerMaxPoolSize #{node[:passenger][:max_pool_size]}
 #
 # Single project

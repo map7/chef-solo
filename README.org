@@ -22,20 +22,24 @@
 
 This part maybe handled by using passenger_apache2.
 
-Installing passenger.
+**** Server side
+
+Check that passenger is installed, if it isn't then install it with:
 : sudo passenger-install-apache2-module
 
 Edit /etc/apache2/sites-enabled/rails_project, and follow the example
 
-Restart apache2
-: cap passenger:restart
-
 You may have to restart apache2 on the server
 : sudo service apache2 restart
 
+**** Dev box
+
+Restarting apache2 from your DEV box.
+: cap passenger:restart
+
 **** Passenger
 
-Max pool size should be set to '2' for VPS's with 256MB RAM. Default is 6.
+Max pool size should be set to '2' for VPS's with 256MB RAM. Default is 6. This is set in the /etc/apache2/sites-enabled/rails_project.
 
 **** Capistrano
 [[http://railscasts.com/episodes/133-capistrano-tasks/][Capistrano Railscast]]
@@ -60,6 +64,14 @@ Assuming you have a database.yml.example file you could do
 Now edit your database.yml file so that it has only the production database details in it.
 
 **** Troubleshooting
+
+***** Gems not updating on server
+If you want to update a Gem make sure you explicitly state the version number in the Gemfile before deploying.
+
+EG:
+gem 'gmaps4rails', '1.5.2'
+
+gems are placed in the shared/bundle directory and will not show up with 'gem list' on the server.
 
 ***** Passenger: Unexpected end-of-file
 
