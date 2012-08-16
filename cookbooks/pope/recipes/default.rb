@@ -51,8 +51,8 @@ PassengerMaxPoolSize #{node[:passenger][:max_pool_size]}
 # <VirtualHost *:80>
 #    ServerName www.yourhost.com
 #    # !!! Be sure to point DocumentRoot to 'public'!
-#    DocumentRoot /somewhere/public    
-#    <Directory /somewhere/public>
+#    DocumentRoot /srv/project/current/public    
+#    <Directory /srv/project/current/public>
 #       # This relaxes Apache security settings.
 #       AllowOverride all
 #       # MultiViews must be turned off.

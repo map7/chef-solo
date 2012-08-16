@@ -1,4 +1,6 @@
 * Chef-solo
+Find cookbooks http://community.opscode.com/cookbooks
+
   Bootstrapping files for creating a Ruby on Rails server on an 
   Tested on Ubuntu 12.04 server, with Ruby on Rails 3.2.7 and Ruby 1.9.3-p125
 
@@ -10,10 +12,18 @@
 : ssh-copy-id <user>@<host>
 
 2. Configure your user for passwordless sudo by adding to your /etc/sudoers file: (Last line)
+: sudo nano /etc/sudoers
+Edit sudos and put this as the LAST LINE.
+: %adm ALL=NOPASSWD: ALL
+OR
 : %admin ALL=NOPASSWD: ALL
+(Check 'groups' command under Ubuntu to see what group to allow)
 
 ** Running
 : ./deploy.sh <user>@<host> <json>
+
+Example
+: ./deploy.sh vps@10.1.1.146 webserver.json
 
    json - This is optional. I've put this there so you can have different server
    setup config files. eg: web_server.json
@@ -23,9 +33,6 @@
 This part maybe handled by using passenger_apache2.
 
 **** Server side
-
-Check that passenger is installed, if it isn't then install it with:
-: sudo passenger-install-apache2-module
 
 Edit /etc/apache2/sites-enabled/rails_project, and follow the example
 
@@ -41,27 +48,45 @@ Restarting apache2 from your DEV box.
 
 Max pool size should be set to '2' for VPS's with 256MB RAM. Default is 6. This is set in the /etc/apache2/sites-enabled/rails_project.
 
+**** Add your new server to your github.
+
+ssh into your server and do
+: ssh-keygen -t rsa -C "your_email@youremail.com"
+: cat .ssh/id_rsa.pub
+
+Testing with
+: git clone git@github.com:map7/venuebat.git
+
+
+Copy the .ssh/id_rsa.pub file into your github profile.
+
+
 **** Capistrano
 [[http://railscasts.com/episodes/133-capistrano-tasks/][Capistrano Railscast]]
 
 The next step after your machine is setup is to setup capistrano for deployment.
-	 
 
 Use capistrano to deploy your app.
 <config deploy.rb>
 
 : cap deploy:setup
 : cap deploy:cold
-: cap deploy:seed
 
 ssh into server and do the following
 : cd /srv/<project>/shared
 : mkdir config
 
 Assuming you have a database.yml.example file you could do 
+: mkdir /srv/<project>/shared/config
 : cp /srv/<project>/current/config/database.yml.example /srv/<project>/shared/config/database.yml
 
 Now edit your database.yml file so that it has only the production database details in it.
+
+You can now create and seed the database
+: cap deploy:cold
+: cap deploy:seed
+: cap deploy:restart
+
 
 **** Troubleshooting
 
