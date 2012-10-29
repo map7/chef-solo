@@ -4,11 +4,14 @@
 	
 	"postgresql":{"password":{"postgres":"password"}},
 	"passenger":{"version":"3.0.14", "max_pool_size":"2"},
+	"default_attributes":{"build_essential":{"compiletime": "true"}},
 
 	"run_list": [ 
+		"recipe[build-essential]",
 		"role[web_server]",
 		"recipe[sqlite]",
 		"recipe[postgresql::server]",
 		"recipe[pope::default]"
 	]
+
 }
