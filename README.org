@@ -5,8 +5,12 @@ Find cookbooks http://community.opscode.com/cookbooks
   Tested on Ubuntu 12.04 server, with Ruby on Rails 3.2.7 and Ruby 1.9.3-p125
 
 ** Requirements
-   Blank Ubuntu 12.04 server machine with SSH access
 
+Blank Ubuntu 12.04 server machine with SSH access
+
+Make sure on your machine which you are running the chef commands from that you have ruby, chef & knife-solo installed
+
+: gem install chef knife-solo
 
 ** Prepare server
 
