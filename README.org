@@ -131,3 +131,9 @@ During the install
 I typically put my video drives in /storage? (where ? is the number of the drive)
 
 If you want to share a /storage? directory then look at /etc/samba/smb.conf
+** Installing Gems
+
+You must have a ruby installed in the system otherwise chef will install your gem into the embedded area (/opt/chef/embedded/bin/)
+
+gem_package = Installs into the system area
+chef_gem = Installs into embedded area for use in chef scripts.
