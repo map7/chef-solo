@@ -1,5 +1,5 @@
 {
-	"dbuser": "vps",
+	"dbuser": "test",
 	"dbpass": "mypasswd",
 	
 	"postgresql":{"password":{"postgres":"password"}},
