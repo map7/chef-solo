@@ -5,28 +5,26 @@ Find cookbooks http://community.opscode.com/cookbooks
   Tested on Ubuntu 12.04 server, with Ruby on Rails 3.2.7 and Ruby 1.9.3-p125
 
 ** Requirements
-   Blank Ubuntu 12.04 server machine with passwordless SSH access and
-   passwordless sudo for your user.
 
-1. Passwordless ssh
-: ssh-copy-id <user>@<host>
+Blank Ubuntu 12.04 server machine with SSH access
 
-2. Configure your user for passwordless sudo by adding to your /etc/sudoers file: (Last line)
-: sudo nano /etc/sudoers
-Edit sudos and put this as the LAST LINE.
-: %adm ALL=NOPASSWD: ALL
-OR
-: %admin ALL=NOPASSWD: ALL
-(Check 'groups' command under Ubuntu to see what group to allow)
+Make sure on your machine which you are running the chef commands from that you have ruby, chef & knife-solo installed
+
+: gem install chef knife-solo
+
+** Prepare server
+
+Create a new node
+: cd nodes
+: cp webserver.json <Server IP>.json
+
+Prepare the server, ie: bootstap & install chef.
+: knife prepare <user>@<Server IP>
 
 ** Running
-: ./deploy.sh <user>@<host> <json>
 
-Example
-: ./deploy.sh vps@10.1.1.146 webserver.json
-
-   json - This is optional. I've put this there so you can have different server
-   setup config files. eg: web_server.json
+Run chef-solo on server
+: knife cook <user>@<Server IP>
 
 *** After system is built
 
