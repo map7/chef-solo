@@ -1,0 +1,10 @@
+{
+	"dbuser": "map7",
+	"dbpass": "68firebird",
+	"run_list": [ 
+		"role[web_server]",
+		"recipe[sqlite]",
+		"recipe[postgresql::server]",
+		"recipe[main::default]"
+	]
+}
