@@ -5,8 +5,12 @@
 	"postgresql":{"password":{"postgres":"password"}},
 	"passenger":{"version":"3.0.14", "max_pool_size":"2"},
 	"default_attributes":{"build_essential":{"compiletime": "true"}},
+	"ruby_installer":{
+			"source_version": "1.9.3p194"
+	},
 
 	"run_list": [ 
+		"recipe[ruby_installer]",
 		"recipe[build-essential]",
 		"role[web_server]",
 		"recipe[sqlite]",
