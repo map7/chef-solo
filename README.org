@@ -26,6 +26,8 @@ Prepare the server, ie: bootstap & install chef.
 Run chef-solo on server
 : knife cook <user>@<Server IP>
 
+NOTE: Sometimes I've had to re-run the prepare again for the cook to work properly.
+
 *** After system is built
 
 This part maybe handled by using passenger_apache2.
