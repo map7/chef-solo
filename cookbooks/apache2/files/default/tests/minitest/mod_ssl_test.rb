@@ -1,11 +1,15 @@
-require File.expand_path('../helpers', __FILE__)
+require File.expand_path('../support/helpers', __FILE__)
 
 describe 'apache2::mod_ssl' do
   include Helpers::Apache
 
   it 'installs the mod_ssl package on RHEL distributions' do
-    skip unless ["redhat", "centos", "scientific", "fedora", "amazon"].include? node.platform
+    skip unless ["rhel", "fedora"].include? node['platform_family']
     package("mod_ssl").must_be_installed
+  end
+
+  it 'enables ssl_module' do
+    apache_enabled_modules.must_include "ssl_module"
   end
 
   it 'does not store SSL config in conf.d' do

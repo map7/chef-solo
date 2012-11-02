@@ -3,6 +3,7 @@ include_recipe "postgresql::server"
 
 # --- Install packages we need ---
 package 'sysstat'
+package 'vim'
 package 'htop'
 package 'screen'
 package 'apt-file'
@@ -25,8 +26,8 @@ file "/etc/apache2/mods-enabled/phusion.load" do
   mode "0644"
   action :create
   content "
-LoadModule passenger_module /usr/local/lib/ruby/gems/1.9.1/gems/passenger-3.0.14/ext/apache2/mod_passenger.so
-PassengerRoot /usr/local/lib/ruby/gems/1.9.1/gems/passenger-3.0.14
+LoadModule passenger_module /var/lib/gems/1.9.1/gems/passenger-3.0.14/ext/apache2/mod_passenger.so
+PassengerRoot /var/lib/gems/1.9.1/gems/passenger-3.0.14
 PassengerRuby /usr/local/bin/ruby
 "
 end
@@ -74,6 +75,9 @@ PassengerMaxPoolSize #{node[:passenger][:max_pool_size]}
 # </VirtualHost>
 
 "
+  not_if do
+    File.exists?("/etc/apache2/sites-enabled/rails_project")
+  end
 end
 
 # Setup permissions on deployment area.
