@@ -75,6 +75,9 @@ PassengerMaxPoolSize #{node[:passenger][:max_pool_size]}
 # </VirtualHost>
 
 "
+  not_if do
+    File.exists?("/etc/apache2/sites-enabled/rails_project")
+  end
 end
 
 # Setup permissions on deployment area.
