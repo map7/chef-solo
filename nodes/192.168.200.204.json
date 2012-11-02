@@ -6,7 +6,9 @@
 	"passenger":{"version":"3.0.14", "max_pool_size":"2"},
 	"default_attributes":{"build_essential":{"compiletime": "true"}},
 	"ruby_installer":{
-			"package_name": "ruby1.9.1"
+		"package_name": "ruby1.9.1",
+		"rubydev_package": "ruby1.9.1-dev",
+		"rubygem_package": false
 	},
 
 	"run_list": [ 
