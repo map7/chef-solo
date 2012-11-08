@@ -28,7 +28,7 @@ file "/etc/apache2/mods-enabled/phusion.load" do
   content "
 LoadModule passenger_module /var/lib/gems/1.9.1/gems/passenger-3.0.14/ext/apache2/mod_passenger.so
 PassengerRoot /var/lib/gems/1.9.1/gems/passenger-3.0.14
-PassengerRuby /usr/local/bin/ruby
+PassengerRuby /usr/bin/ruby1.9.1
 "
 end
 
