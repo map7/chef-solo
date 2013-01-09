@@ -16,12 +16,18 @@ Make sure on your machine which you are running the chef commands from that you 
 
 Create a new node
 : cd nodes
-: cp webserver.json <Server IP>.json
+: cp ../node-templates/webserver.json <Server IP>.json
+
+Edit <Server IP>.json file and change  username and password to anything you like and remove or add cookbooks if you want.
 
 Prepare the server, ie: bootstap & install chef.
 : knife prepare <user>@<Server IP>
 
 ** Running
+
+Optional: install ssh-copy-id for passwordless ssh setup to your server
+: ssh-copy-id <user>@<Server IP>
+
 
 Run chef-solo on server
 : knife cook <user>@<Server IP>
