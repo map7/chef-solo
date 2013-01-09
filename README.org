@@ -20,6 +20,8 @@ Create a new node
 
 Edit <Server IP>.json file and change  username and password to anything you like and remove or add cookbooks if you want.
 
+NOTE: Your 'dbuser' should be the same as your 'linuxuser'.
+
 Prepare the server, ie: bootstap & install chef.
 : knife prepare <user>@<Server IP>
 
