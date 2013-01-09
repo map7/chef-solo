@@ -1,4 +1,5 @@
 {
+	"linuxuser": "test",
 	"dbuser": "test",
 	"dbpass": "mypasswd",
 	

@@ -81,8 +81,8 @@ PassengerMaxPoolSize #{node[:passenger][:max_pool_size]}
 end
 
 # Setup permissions on deployment area.
-execute "Add #{node[:dbuser]} to group www-data" do
-  command "usermod -a -G www-data #{node[:dbuser]}"
+execute "Add #{node[:linuxuser]} to group www-data" do
+  command "usermod -a -G www-data #{node[:linuxuser]}"
 end
 
 execute "Change group on /srv" do 
