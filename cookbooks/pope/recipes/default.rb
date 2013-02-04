@@ -2,9 +2,12 @@ include_recipe "apache2"
 include_recipe "postgresql::server"
 
 # --- Install packages we need ---
-package 'sysstat'
+package 'fail2ban' # Security for login attempts
+package 'mutt'     # Email client
+package 'sysstat'  # Monitor io
+package 'nethogs'  # Monitor network
+package 'htop'     # Better than top
 package 'vim'
-package 'htop'
 package 'screen'
 package 'apt-file'
 package 'command-not-found'
